@@ -134,13 +134,22 @@ impl SettingsStore {
         }
     }
 
-    /// Saves selected fields after checking the current bytes both before writing and directly
-    /// before replacement. Filesystem APIs do not provide a portable compare-and-rename, so an
-    /// arbitrary external editor can still race the final check and rename.
+    /// Saves selected fields after rechecking the effective source and bytes directly before
+    /// replacement. Filesystem APIs do not provide a portable compare-and-rename, so an arbitrary
+    /// external editor can still race the final check and rename.
     pub fn write(
         paths: &AppPaths,
         expected: &ConfigSnapshot,
         changes: &[(SettingKey, SettingValue)],
+    ) -> Result<ConfigSnapshot, StoreError> {
+        Self::write_with_hook(paths, expected, changes, || {})
+    }
+
+    fn write_with_hook(
+        paths: &AppPaths,
+        expected: &ConfigSnapshot,
+        changes: &[(SettingKey, SettingValue)],
+        before_replace: impl FnOnce(),
     ) -> Result<ConfigSnapshot, StoreError> {
         if let ConfigStatus::Unreadable(error) = &expected.status {
             return Err(StoreError::Inaccessible(error.clone()));
@@ -162,7 +171,7 @@ impl SettingsStore {
         }
         let path = &paths.config;
         let actual = current.text;
-        let canonical_missing = !path.exists();
+        let canonical_present = path.symlink_metadata().is_ok();
         let mut doc = actual
             .parse::<toml_edit::DocumentMut>()
             .map_err(|e| StoreError::Malformed(e.to_string()))?;
@@ -198,17 +207,21 @@ impl SettingsStore {
             temp = path.with_extension(format!("toml.{}-{suffix}.tmp", std::process::id()));
         }
         let mut temp_created = false;
+        let mut before_replace = Some(before_replace);
         let result = (|| -> Result<(), std::io::Error> {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
             }
             write_temp_file(&temp, updated.as_bytes())?;
             temp_created = true;
-            let unchanged = if canonical_missing {
-                matches!(fs::symlink_metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
-            } else {
-                fs::read(path).is_ok_and(|latest| latest == actual.as_bytes())
-            };
+            if let Some(hook) = before_replace.take() {
+                hook();
+            }
+            let latest = Self::read(paths);
+            let unchanged = !matches!(latest.status, ConfigStatus::Unreadable(_))
+                && latest.path == current.path
+                && latest.text.as_bytes() == actual.as_bytes()
+                && path.symlink_metadata().is_ok() == canonical_present;
             if !unchanged {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::WouldBlock,
@@ -494,6 +507,71 @@ mod tests {
             std::fs::read_to_string(&p.legacy_config).unwrap(),
             "height_percent=55\n"
         );
+    }
+    #[test]
+    fn legacy_change_before_replace_conflicts_instead_of_copying_stale_snapshot() {
+        let p = temp();
+        std::fs::create_dir_all(p.legacy_config.parent().unwrap()).unwrap();
+        std::fs::write(&p.legacy_config, "height_percent=40\n").unwrap();
+        let expected = SettingsStore::read(&p);
+        let result = SettingsStore::write_with_hook(
+            &p,
+            &expected,
+            &[(SettingKey::HeightPercent, SettingValue::U8(70))],
+            || std::fs::write(&p.legacy_config, "height_percent=60\n").unwrap(),
+        );
+        assert!(matches!(result, Err(StoreError::Conflict(_))));
+        assert!(!p.config.exists());
+        assert_eq!(
+            std::fs::read_to_string(&p.legacy_config).unwrap(),
+            "height_percent=60\n"
+        );
+    }
+    #[test]
+    fn canonical_created_before_replace_is_not_overwritten_by_legacy_copy() {
+        let p = temp();
+        std::fs::create_dir_all(p.legacy_config.parent().unwrap()).unwrap();
+        std::fs::write(&p.legacy_config, "height_percent=40\n").unwrap();
+        let expected = SettingsStore::read(&p);
+        let result = SettingsStore::write_with_hook(
+            &p,
+            &expected,
+            &[(SettingKey::HeightPercent, SettingValue::U8(70))],
+            || {
+                std::fs::create_dir_all(p.config.parent().unwrap()).unwrap();
+                std::fs::write(&p.config, "height_percent=60\n").unwrap();
+            },
+        );
+        assert!(matches!(result, Err(StoreError::Conflict(_))));
+        assert_eq!(
+            std::fs::read_to_string(&p.config).unwrap(),
+            "height_percent=60\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&p.legacy_config).unwrap(),
+            "height_percent=40\n"
+        );
+    }
+    #[test]
+    fn canonical_deleted_before_replace_is_not_replaced_from_stale_snapshot() {
+        let p = temp();
+        std::fs::create_dir_all(p.config.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(p.legacy_config.parent().unwrap()).unwrap();
+        std::fs::write(&p.config, "height_percent=50\n").unwrap();
+        std::fs::write(&p.legacy_config, "height_percent=40\n").unwrap();
+        let expected = SettingsStore::read(&p);
+        let result = SettingsStore::write_with_hook(
+            &p,
+            &expected,
+            &[(SettingKey::HeightPercent, SettingValue::U8(70))],
+            || std::fs::remove_file(&p.config).unwrap(),
+        );
+        assert!(matches!(result, Err(StoreError::Conflict(_))));
+        assert_eq!(
+            std::fs::read_to_string(&p.legacy_config).unwrap(),
+            "height_percent=40\n"
+        );
+        assert!(!p.config.exists());
     }
     #[test]
     fn unreadable_snapshot_cannot_be_used_to_overwrite_canonical_config() {
