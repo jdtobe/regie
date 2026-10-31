@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 390 128" width="390" height="128" aria-label="Regie">
+<!-- Live lettering depends on locally available Georgia or system serif; not outlined. -->
+<g fill="none" stroke="#2B4C3B" stroke-linecap="round" stroke-linejoin="round">
+<path d="M46 29 H30 V99 H46 M82 29 H98 V99 H82" stroke-width="9"/>
+<path d="M51.5 39 L64 51.5 L76.5 39 M51.5 71.5 H76.5" transform="translate(0 8.75)" stroke-width="10.5"/>
+</g>
+<text x="144" y="86" fill="#1C2B25" font-family="Georgia,serif" font-size="70" letter-spacing="-2">Regie</text>
+</svg>

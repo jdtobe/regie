@@ -1,26 +1,23 @@
-# Icons
+# Regie icons
 
-One drawing, two scales: a filled bar (the menubar edge) with an outlined pane
-hanging under it. In the 22-unit space the bar is `x 3.5..18.5, y 4.5..6.9`
-(radius 1.2), the pane is `x 5.5..16.5, y 9..18` (radius 1.8, stroke 1.6), so the
-gap is 2.1. The app icon is that drawing scaled 40 times inside the squircle.
+**Descending Cue:** continuous brackets frame a down-chevron above a cursor bar.
+The cue uses the approved downward spacing correction: 1.75 units in the 22-unit
+template, 8.75 in the 128-unit app concept. Do not move the brackets with it.
 
-The accent is amber `#e9a13b` on charcoal `#1c1c1c`, with the pane in `#d0d0d0`
-(the terminal's foreground colour).
-
-| File | What it is |
+| File | Purpose |
 |---|---|
-| `menubar.svg` | Template source: one colour, transparent background, 22-unit grid. |
-| `menubar-22.png` | Template at 1x, black with alpha. |
-| `menubar-44.png` | Template at 2x. |
-| `app.svg` | App icon source, 1024 canvas. |
-| `app-1024.png` | App icon master. |
-| `Rake.icns` | App icon set, 16 to 1024. |
+| `menubar.svg` | Black/alpha template master, 22-unit grid |
+| `menubar-22.png`, `menubar-44.png` | Actual 1×/2× template assets |
+| `app.svg`, `app-1024.png` | Sage tile, forest glyph, transparent outer corners |
+| `Regie.icns` | Native 16–1024 representations |
+| `symbol.svg` | Transparent standalone symbol |
+| `wordmark.svg` | Plain Regie lockup, live Georgia/system-serif lettering, not outlined |
 
-macOS tints a template image itself: black on a light menubar, white on a dark
-one, so there is no white asset to keep.
+Regenerate offline on macOS with `node scripts/render-icons.js` after installing
+the pinned development WebKit (`npm ci`, `npx playwright install webkit`). No
+fonts or remote images are loaded. SVGs are durable sources; PNGs/ICNS are committed.
+Runtime decodes `menubar-44.png` and `app-1024.png` with the same PNG helper.
+macOS template tinting supplies black/white menubar appearance; no colored accent.
 
-`src/lib.rs` (`build_icon_rgba`) draws the same geometry at 44x44 pixels, twice
-the 22-unit grid, so Retina screens get real pixels; `tray-icon` scales it to 22
-points and marks it as a template. The committed PNGs remain the visual
-reference, and the `.icns` is unused until Rake ships as an `.app` bundle.
+Tile gradient: `#D5E4D1`→`#A2BCA9`; symbol `#2B4C3B`. No baked outer shadow.
+See the [approved geometry](../../docs/superpowers/specs/2026-10-30-regie-brand-design.md).
