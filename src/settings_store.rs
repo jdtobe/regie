@@ -151,6 +151,8 @@ impl SettingsStore {
         changes: &[(SettingKey, SettingValue)],
         before_replace: impl FnOnce(),
     ) -> Result<ConfigSnapshot, StoreError> {
+        let path = &paths.config;
+        let original_mode = canonical_mode(path)?;
         if let ConfigStatus::Unreadable(error) = &expected.status {
             return Err(StoreError::Inaccessible(error.clone()));
         }
@@ -169,9 +171,8 @@ impl SettingsStore {
                     .unwrap_or(SettingKey::Hotkey),
             ));
         }
-        let path = &paths.config;
         let actual = current.text;
-        let canonical_present = path.symlink_metadata().is_ok();
+        let canonical_present = original_mode.is_some();
         let mut doc = actual
             .parse::<toml_edit::DocumentMut>()
             .map_err(|e| StoreError::Malformed(e.to_string()))?;
@@ -208,27 +209,34 @@ impl SettingsStore {
         }
         let mut temp_created = false;
         let mut before_replace = Some(before_replace);
-        let result = (|| -> Result<(), std::io::Error> {
+        let result = (|| -> Result<(), StoreError> {
             if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)?;
+                fs::create_dir_all(parent)
+                    .map_err(|error| StoreError::FailedWrite(error.to_string()))?;
             }
-            write_temp_file(&temp, updated.as_bytes())?;
+            write_temp_file(&temp, updated.as_bytes(), original_mode)
+                .map_err(|error| StoreError::FailedWrite(error.to_string()))?;
             temp_created = true;
             if let Some(hook) = before_replace.take() {
                 hook();
+            }
+            let latest_canonical_mode = canonical_mode(path)?;
+            if latest_canonical_mode != original_mode {
+                return Err(StoreError::Conflict(
+                    changes.first().map(|c| c.0).unwrap_or(SettingKey::Hotkey),
+                ));
             }
             let latest = Self::read(paths);
             let unchanged = !matches!(latest.status, ConfigStatus::Unreadable(_))
                 && latest.path == current.path
                 && latest.text.as_bytes() == actual.as_bytes()
-                && path.symlink_metadata().is_ok() == canonical_present;
+                && latest_canonical_mode.is_some() == canonical_present;
             if !unchanged {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::WouldBlock,
-                    "file changed during write",
+                return Err(StoreError::Conflict(
+                    changes.first().map(|c| c.0).unwrap_or(SettingKey::Hotkey),
                 ));
             }
-            fs::rename(&temp, path)?;
+            fs::rename(&temp, path).map_err(|error| StoreError::FailedWrite(error.to_string()))?;
             if let Some(parent) = path.parent() {
                 if let Ok(dir) = fs::File::open(parent) {
                     let _ = dir.sync_all();
@@ -240,11 +248,7 @@ impl SettingsStore {
             if temp_created {
                 let _ = fs::remove_file(&temp);
             }
-            return Err(if e.kind() == std::io::ErrorKind::WouldBlock {
-                StoreError::Conflict(changes.first().map(|c| c.0).unwrap_or(SettingKey::Hotkey))
-            } else {
-                StoreError::FailedWrite(e.to_string())
-            });
+            return Err(e);
         }
         Ok(Self::read(paths))
     }
@@ -264,17 +268,60 @@ fn unreadable(path: PathBuf, error: String) -> ConfigSnapshot {
         status: ConfigStatus::Unreadable(error),
     }
 }
-fn write_temp_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
-    if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+fn write_temp_file(path: &std::path::Path, bytes: &[u8], mode: Option<u32>) -> std::io::Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    let write_result = file.write_all(bytes);
+    #[cfg(unix)]
+    let write_result = write_result.and_then(|()| {
+        if let Some(mode) = mode {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(mode))?;
+        }
+        Ok(())
+    });
+    #[cfg(not(unix))]
+    let write_result = write_result;
+    let write_result = write_result.and_then(|()| file.sync_all());
+    if let Err(error) = write_result {
         drop(file);
         let _ = fs::remove_file(path);
         return Err(error);
     }
     Ok(())
+}
+fn canonical_mode(path: &std::path::Path) -> Result<Option<u32>, StoreError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(StoreError::Inaccessible(format!(
+                "could not inspect {}: {error}",
+                path.display()
+            )))
+        }
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(StoreError::Inaccessible(format!(
+            "{} is a symbolic link; settings cannot be saved through it. Replace it with a regular config file or edit the link target manually.",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        Ok(Some(metadata.permissions().mode() & 0o777))
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(Some(0))
+    }
 }
 fn fields(text: &str) -> Vec<FieldState> {
     let parsed = toml::from_str::<toml::Value>(text);
@@ -464,7 +511,7 @@ mod tests {
         std::fs::create_dir_all(p.config.parent().unwrap()).unwrap();
         let temp_path = p.config.with_extension("toml.occupied.tmp");
         std::fs::write(&temp_path, "owned by another process").unwrap();
-        assert!(write_temp_file(&temp_path, b"ours").is_err());
+        assert!(write_temp_file(&temp_path, b"ours", None).is_err());
         assert_eq!(
             std::fs::read(&temp_path).unwrap(),
             b"owned by another process"
@@ -572,6 +619,104 @@ mod tests {
             "height_percent=40\n"
         );
         assert!(!p.config.exists());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn refuses_canonical_symlink_writes_without_replacing_or_modifying_target() {
+        use std::os::unix::fs::symlink;
+        let p = temp();
+        std::fs::create_dir_all(p.config.parent().unwrap()).unwrap();
+        let target = p.config.parent().unwrap().join("real-config.toml");
+        std::fs::write(&target, "height_percent=42\n").unwrap();
+        symlink(&target, &p.config).unwrap();
+        let expected = SettingsStore::read(&p);
+        assert_eq!(expected.text, "height_percent=42\n");
+        let err = SettingsStore::write(
+            &p,
+            &expected,
+            &[(SettingKey::HeightPercent, SettingValue::U8(70))],
+        )
+        .unwrap_err();
+        assert!(matches!(err, StoreError::Inaccessible(_)));
+        assert!(format!("{err:?}").contains("symbolic link"));
+        assert!(p
+            .config
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "height_percent=42\n"
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn replacement_preserves_existing_canonical_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let p = temp();
+        std::fs::create_dir_all(p.config.parent().unwrap()).unwrap();
+        std::fs::write(&p.config, "height_percent=40\n").unwrap();
+        std::fs::set_permissions(&p.config, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let expected = SettingsStore::read(&p);
+        SettingsStore::write(
+            &p,
+            &expected,
+            &[(SettingKey::HeightPercent, SettingValue::U8(70))],
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::metadata(&p.config).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn newly_created_canonical_config_uses_private_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let p = temp();
+        let expected = SettingsStore::read(&p);
+        SettingsStore::write(
+            &p,
+            &expected,
+            &[(SettingKey::HeightPercent, SettingValue::U8(70))],
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::metadata(&p.config).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn canonical_symlink_swap_before_replace_is_rejected() {
+        use std::os::unix::fs::symlink;
+        let p = temp();
+        std::fs::create_dir_all(p.config.parent().unwrap()).unwrap();
+        std::fs::write(&p.config, "height_percent=40\n").unwrap();
+        let target = p.config.parent().unwrap().join("symlink-target.toml");
+        std::fs::write(&target, "height_percent=42\n").unwrap();
+        let expected = SettingsStore::read(&p);
+        let result = SettingsStore::write_with_hook(
+            &p,
+            &expected,
+            &[(SettingKey::HeightPercent, SettingValue::U8(70))],
+            || {
+                std::fs::remove_file(&p.config).unwrap();
+                symlink(&target, &p.config).unwrap();
+            },
+        );
+        assert!(matches!(result, Err(StoreError::Inaccessible(_))));
+        assert!(p
+            .config
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "height_percent=42\n"
+        );
     }
     #[test]
     fn unreadable_snapshot_cannot_be_used_to_overwrite_canonical_config() {
