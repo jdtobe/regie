@@ -95,11 +95,11 @@ mod macos {
         ))
     }
 
-    fn palette(profile: &NSDictionary) -> Option<[Rgb; 16]> {
+    fn palette(colors: [Option<Rgb>; 16]) -> Option<[Rgb; 16]> {
         // Half a palette would look worse than xterm.js's own set, so take all or nothing.
         let mut ansi = [Rgb::new(0, 0, 0); 16];
-        for (slot, name) in ansi.iter_mut().zip(ANSI_KEYS) {
-            *slot = color(profile, name)?;
+        for (slot, color) in ansi.iter_mut().zip(colors) {
+            *slot = color?;
         }
         Some(ansi)
     }
@@ -126,16 +126,101 @@ mod macos {
     pub(super) fn from_default_terminal() -> Option<TerminalTheme> {
         let defaults = defaults()?;
         let profile = default_profile(&defaults)?;
+        from_profile(&profile)
+    }
+
+    fn from_profile(profile: &NSDictionary) -> Option<TerminalTheme> {
+        let background = color(profile, "BackgroundColor");
+        let foreground = color(profile, "TextColor");
+        let cursor = color(profile, "CursorColor");
+        let ansi = ANSI_KEYS.map(|key| color(profile, key));
+        if background.is_none()
+            && foreground.is_none()
+            && cursor.is_none()
+            && ansi.iter().all(Option::is_none)
+        {
+            return None;
+        }
         let fallback = TerminalTheme::profile_fallback();
-        let font = font(&profile);
+        let font = font(profile);
         Some(TerminalTheme {
-            background: color(&profile, "BackgroundColor").unwrap_or(fallback.background),
-            foreground: color(&profile, "TextColor"),
-            cursor: color(&profile, "CursorColor"),
-            ansi: palette(&profile),
+            background: background.unwrap_or(fallback.background),
+            foreground,
+            cursor,
+            ansi: palette(ansi),
             font_family: font.family,
             font_size: font.size,
             ..fallback
         })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use objc2::runtime::AnyObject;
+        use objc2_foundation::NSKeyedArchiver;
+
+        fn archive(object: &AnyObject) -> Retained<NSData> {
+            unsafe {
+                NSKeyedArchiver::archivedDataWithRootObject_requiringSecureCoding_error(
+                    object, true,
+                )
+            }
+            .unwrap()
+        }
+
+        #[test]
+        fn undecodable_color_archives_trigger_regie_fallback_but_keep_font() {
+            objc2::rc::autoreleasepool(|_| {
+                let native_font = NSFont::fontWithName_size(&key("Menlo"), 11.0).unwrap();
+                let font_data = archive(&native_font);
+                // A valid archive of the wrong class is undecodable as NSColor.
+                let wrong_class = archive(&key("not a color"));
+                let keys: Vec<_> = ["BackgroundColor", "TextColor", "CursorColor", "Font"]
+                    .map(key)
+                    .into();
+                let profile = NSDictionary::from_slices(
+                    &keys.iter().map(|k| &**k).collect::<Vec<_>>(),
+                    &[
+                        &*wrong_class as &AnyObject,
+                        &*wrong_class,
+                        &*wrong_class,
+                        &*font_data,
+                    ],
+                );
+                // Erase key generics to match the untyped Terminal preferences reader.
+                let profile: Retained<NSDictionary> = unsafe { Retained::cast_unchecked(profile) };
+                let decoded = from_profile(&profile);
+                assert!(
+                    decoded.is_none(),
+                    "no decodable colors must not count as a usable color profile"
+                );
+                let resolved = crate::theme::resolve(
+                    crate::config::TerminalThemeSource::Macos,
+                    decoded,
+                    font(&profile),
+                );
+                assert_eq!(resolved.theme.background.hex(), "#121615");
+                assert_eq!(resolved.theme.font_family.as_deref(), Some("Menlo"));
+                assert_eq!(resolved.theme.font_size, Some(14.7));
+                assert!(resolved.notices.join(" ").contains("Regie Dark"));
+            });
+        }
+
+        #[test]
+        fn one_readable_profile_color_keeps_neutral_partial_defaults() {
+            objc2::rc::autoreleasepool(|_| {
+                let color = NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 0.0, 0.0, 1.0);
+                let data = archive(&color);
+                let profile =
+                    NSDictionary::from_slices(&[&*key("TextColor")], &[&*data as &AnyObject]);
+                let profile: Retained<NSDictionary> = unsafe { Retained::cast_unchecked(profile) };
+                let theme = from_profile(&profile).unwrap();
+                assert_eq!(theme.background.hex(), "#1e1e1e");
+                assert_eq!(theme.foreground.unwrap().hex(), "#ff0000");
+                assert_eq!(theme.selection_background, None);
+                assert_eq!(theme.cursor_accent, None);
+            });
+        }
     }
 }
