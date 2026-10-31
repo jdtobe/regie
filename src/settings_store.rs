@@ -1,0 +1,512 @@
+//! Lossless, field-oriented access to the user's TOML settings.
+use crate::{
+    app_paths::{self, AppPaths},
+    config::{
+        self, Appearance, Config, LastTabAction, NewTabDirectory, StartupTabs, TabPosition,
+        TerminalThemeSource,
+    },
+};
+use std::{fs, io::Write, path::PathBuf};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SettingKey {
+    Hotkey,
+    HeightPercent,
+    WidthPercent,
+    HideOnFocusLost,
+    AnimationMs,
+    TabPosition,
+    NewTabDirectory,
+    StartupTabs,
+    LastTabAction,
+    Appearance,
+    TerminalTheme,
+}
+impl SettingKey {
+    pub const ALL: [Self; 11] = [
+        Self::Hotkey,
+        Self::HeightPercent,
+        Self::WidthPercent,
+        Self::HideOnFocusLost,
+        Self::AnimationMs,
+        Self::TabPosition,
+        Self::NewTabDirectory,
+        Self::StartupTabs,
+        Self::LastTabAction,
+        Self::Appearance,
+        Self::TerminalTheme,
+    ];
+    fn name(self) -> &'static str {
+        match self {
+            Self::Hotkey => "hotkey",
+            Self::HeightPercent => "height_percent",
+            Self::WidthPercent => "width_percent",
+            Self::HideOnFocusLost => "hide_on_focus_lost",
+            Self::AnimationMs => "animation_ms",
+            Self::TabPosition => "tab_position",
+            Self::NewTabDirectory => "new_tab_directory",
+            Self::StartupTabs => "startup_tabs",
+            Self::LastTabAction => "last_tab_action",
+            Self::Appearance => "appearance",
+            Self::TerminalTheme => "terminal_theme",
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingValue {
+    String(String),
+    U8(u8),
+    U32(u32),
+    Bool(bool),
+    TabPosition(TabPosition),
+    NewTabDirectory(NewTabDirectory),
+    StartupTabs(StartupTabs),
+    LastTabAction(LastTabAction),
+    Appearance(Appearance),
+    TerminalTheme(TerminalThemeSource),
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldState {
+    pub key: SettingKey,
+    pub value: Option<SettingValue>,
+    pub error: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigStatus {
+    Valid(Config),
+    Invalid,
+    Malformed(String),
+    Unreadable(String),
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigSnapshot {
+    pub path: PathBuf,
+    pub text: String,
+    pub fields: Vec<FieldState>,
+    pub status: ConfigStatus,
+}
+#[derive(Debug)]
+pub enum StoreError {
+    Conflict(SettingKey),
+    Malformed(String),
+    Inaccessible(String),
+    FailedWrite(String),
+}
+pub struct SettingsStore;
+
+impl SettingsStore {
+    pub fn read(paths: &AppPaths) -> ConfigSnapshot {
+        let path = paths.config.clone();
+        let (source, bytes) = match fs::read(&path) {
+            Ok(b) => (path.clone(), b),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    && matches!(fs::symlink_metadata(&path), Err(ref m) if m.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                match app_paths::read_preferred(&path, &paths.legacy_config) {
+                    Ok(Some(file)) => (file.path, file.bytes),
+                    Ok(None) => (path.clone(), Vec::new()),
+                    Err(e) => return unreadable(path, e),
+                }
+            }
+            Err(e) => {
+                return unreadable(
+                    path.clone(),
+                    format!("could not read {}: {e}", path.display()),
+                )
+            }
+        };
+        let text = match String::from_utf8(bytes) {
+            Ok(t) => t,
+            Err(e) => return unreadable(source, format!("invalid UTF-8: {e}")),
+        };
+        let fields = fields(&text);
+        let status = match Config::from_toml_str(&text) {
+            Ok(c) => ConfigStatus::Valid(c),
+            Err(e) if text.parse::<toml_edit::DocumentMut>().is_err() => ConfigStatus::Malformed(e),
+            Err(_) => ConfigStatus::Invalid,
+        };
+        ConfigSnapshot {
+            path: source,
+            text,
+            fields,
+            status,
+        }
+    }
+
+    /// Saves selected fields after checking the current bytes both before writing and directly
+    /// before replacement. Filesystem APIs do not provide a portable compare-and-rename, so an
+    /// arbitrary external editor can still race the final check and rename.
+    pub fn write(
+        paths: &AppPaths,
+        expected: &ConfigSnapshot,
+        changes: &[(SettingKey, SettingValue)],
+    ) -> Result<ConfigSnapshot, StoreError> {
+        let path = &paths.config;
+        let (actual, canonical_missing) = match fs::read(path) {
+            Ok(b) => (
+                String::from_utf8(b).map_err(|e| StoreError::Malformed(e.to_string()))?,
+                false,
+            ),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    && matches!(fs::symlink_metadata(path), Err(ref m) if m.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                (expected.text.clone(), true)
+            }
+            Err(e) => return Err(StoreError::Inaccessible(format!("{}: {e}", path.display()))),
+        };
+        let mut doc = actual
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|e| StoreError::Malformed(e.to_string()))?;
+        let empty = || toml::Value::Table(Default::default());
+        let expected_values =
+            toml::from_str::<toml::Value>(&expected.text).unwrap_or_else(|_| empty());
+        let actual_values = toml::from_str::<toml::Value>(&actual).unwrap_or_else(|_| empty());
+        for (key, value) in changes {
+            if actual_values.get(key.name()) != expected_values.get(key.name()) {
+                return Err(StoreError::Conflict(*key));
+            }
+            let encoded = encode(value).ok_or_else(|| {
+                StoreError::Malformed(format!("wrong value type for {}", key.name()))
+            })?;
+            // Parse an isolated field via the project's parser, including normal validation.
+            let check = format!("{} = {}", key.name(), encoded);
+            let parsed: toml::Value =
+                toml::from_str(&check).map_err(|e| StoreError::Malformed(e.to_string()))?;
+            decode(*key, parsed.get(key.name()).unwrap()).map_err(StoreError::Malformed)?;
+            let mut replacement = encoded
+                .parse::<toml_edit::Value>()
+                .map_err(|e| StoreError::Malformed(e.to_string()))?;
+            if let Some(old) = doc.get(key.name()).and_then(toml_edit::Item::as_value) {
+                replacement.decor_mut().clone_from(old.decor());
+            }
+            doc[key.name()] = replacement.into();
+        }
+        let updated = doc.to_string();
+        let mut temp = path.with_extension(format!("toml.{}.tmp", std::process::id()));
+        let mut suffix = 0;
+        while temp.exists() {
+            suffix += 1;
+            temp = path.with_extension(format!("toml.{}-{suffix}.tmp", std::process::id()));
+        }
+        let result = (|| -> Result<(), std::io::Error> {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp)?;
+            file.write_all(updated.as_bytes())?;
+            file.sync_all()?;
+            let unchanged = if canonical_missing {
+                matches!(fs::symlink_metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+            } else {
+                fs::read(path).is_ok_and(|latest| latest == actual.as_bytes())
+            };
+            if !unchanged {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "file changed during write",
+                ));
+            }
+            fs::rename(&temp, path)?;
+            if let Some(parent) = path.parent() {
+                if let Ok(dir) = fs::File::open(parent) {
+                    let _ = dir.sync_all();
+                }
+            }
+            Ok(())
+        })();
+        if let Err(e) = result {
+            let _ = fs::remove_file(&temp);
+            return Err(if e.kind() == std::io::ErrorKind::WouldBlock {
+                StoreError::Conflict(changes.first().map(|c| c.0).unwrap_or(SettingKey::Hotkey))
+            } else {
+                StoreError::FailedWrite(e.to_string())
+            });
+        }
+        Ok(Self::read(paths))
+    }
+}
+fn unreadable(path: PathBuf, error: String) -> ConfigSnapshot {
+    ConfigSnapshot {
+        path,
+        text: String::new(),
+        fields: SettingKey::ALL
+            .iter()
+            .map(|key| FieldState {
+                key: *key,
+                value: None,
+                error: Some(error.clone()),
+            })
+            .collect(),
+        status: ConfigStatus::Unreadable(error),
+    }
+}
+fn fields(text: &str) -> Vec<FieldState> {
+    let parsed = toml::from_str::<toml::Value>(text);
+    SettingKey::ALL
+        .iter()
+        .map(|key| {
+            let value = parsed.as_ref().ok().and_then(|v| v.get(key.name()));
+            match value.and_then(|v| decode(*key, v).ok()) {
+                Some(value) => FieldState {
+                    key: *key,
+                    value: Some(value),
+                    error: None,
+                },
+                None if value.is_none() => FieldState {
+                    key: *key,
+                    value: default(*key),
+                    error: None,
+                },
+                None => FieldState {
+                    key: *key,
+                    value: None,
+                    error: Some(format!("invalid {}", key.name())),
+                },
+            }
+        })
+        .collect()
+}
+fn default(k: SettingKey) -> Option<SettingValue> {
+    let c = Config::default();
+    Some(match k {
+        SettingKey::Hotkey => SettingValue::String(c.hotkey),
+        SettingKey::HeightPercent => SettingValue::U8(c.height_percent),
+        SettingKey::WidthPercent => SettingValue::U8(c.width_percent),
+        SettingKey::HideOnFocusLost => SettingValue::Bool(c.hide_on_focus_lost),
+        SettingKey::AnimationMs => SettingValue::U32(c.animation_ms),
+        SettingKey::TabPosition => SettingValue::TabPosition(c.tab_position),
+        SettingKey::NewTabDirectory => SettingValue::NewTabDirectory(c.new_tab_directory),
+        SettingKey::StartupTabs => SettingValue::StartupTabs(c.startup_tabs),
+        SettingKey::LastTabAction => SettingValue::LastTabAction(c.last_tab_action),
+        SettingKey::Appearance => SettingValue::Appearance(c.appearance),
+        SettingKey::TerminalTheme => SettingValue::TerminalTheme(c.terminal_theme),
+    })
+}
+fn decode(k: SettingKey, v: &toml::Value) -> Result<SettingValue, String> {
+    macro_rules! get {
+        ($t:ty,$variant:ident) => {
+            v.clone()
+                .try_into::<$t>()
+                .map(SettingValue::$variant)
+                .map_err(|e: toml::de::Error| e.to_string())
+        };
+    }
+    let out = match k {
+        SettingKey::Hotkey => get!(String, String),
+        SettingKey::HeightPercent => get!(u8, U8),
+        SettingKey::WidthPercent => get!(u8, U8),
+        SettingKey::HideOnFocusLost => get!(bool, Bool),
+        SettingKey::AnimationMs => get!(u32, U32),
+        SettingKey::TabPosition => get!(TabPosition, TabPosition),
+        SettingKey::NewTabDirectory => get!(NewTabDirectory, NewTabDirectory),
+        SettingKey::StartupTabs => get!(StartupTabs, StartupTabs),
+        SettingKey::LastTabAction => get!(LastTabAction, LastTabAction),
+        SettingKey::Appearance => get!(Appearance, Appearance),
+        SettingKey::TerminalTheme => get!(TerminalThemeSource, TerminalTheme),
+    }?;
+    if let SettingValue::String(ref hotkey) = out {
+        crate::hotkey::parse_hotkey(hotkey)?;
+    }
+    if let SettingValue::U8(n) = out {
+        if !config::HEIGHT_PERCENT_RANGE.contains(&n) && k == SettingKey::HeightPercent
+            || !config::WIDTH_PERCENT_RANGE.contains(&n) && k == SettingKey::WidthPercent
+        {
+            return Err(format!("{} out of range", k.name()));
+        }
+        return Ok(SettingValue::U8(n));
+    }
+    if let SettingValue::U32(n) = out {
+        if n > config::ANIMATION_MS_MAX {
+            return Err("animation_ms out of range".into());
+        }
+        return Ok(SettingValue::U32(n));
+    }
+    Ok(out)
+}
+fn encode(v: &SettingValue) -> Option<String> {
+    Some(match v {
+        SettingValue::String(s) => toml::Value::String(s.clone()).to_string(),
+        SettingValue::U8(n) => n.to_string(),
+        SettingValue::U32(n) => n.to_string(),
+        SettingValue::Bool(b) => b.to_string(),
+        SettingValue::TabPosition(v) => toml::Value::try_from(v).ok()?.to_string(),
+        SettingValue::NewTabDirectory(v) => toml::Value::try_from(v).ok()?.to_string(),
+        SettingValue::StartupTabs(v) => toml::Value::try_from(v).ok()?.to_string(),
+        SettingValue::LastTabAction(v) => toml::Value::try_from(v).ok()?.to_string(),
+        SettingValue::Appearance(v) => toml::Value::try_from(v).ok()?.to_string(),
+        SettingValue::TerminalTheme(v) => toml::Value::try_from(v).ok()?.to_string(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn reads_defaults_and_recovers_fields() {
+        let p = temp();
+        std::fs::create_dir_all(p.config.parent().unwrap()).unwrap();
+        let s = SettingsStore::read(&p);
+        assert_eq!(s.fields.len(), 11);
+        assert!(matches!(s.status, ConfigStatus::Valid(_)));
+        std::fs::write(&p.config, "height_percent='bad'\nwidth_percent=66").unwrap();
+        let s = SettingsStore::read(&p);
+        assert!(s
+            .fields
+            .iter()
+            .find(|f| f.key == SettingKey::HeightPercent)
+            .unwrap()
+            .error
+            .is_some());
+        assert_eq!(
+            s.fields
+                .iter()
+                .find(|f| f.key == SettingKey::WidthPercent)
+                .unwrap()
+                .value,
+            Some(SettingValue::U8(66))
+        );
+    }
+    #[test]
+    fn writes_preserving_comments_and_unrelated_keys() {
+        let p = temp();
+        std::fs::create_dir_all(p.config.parent().unwrap()).unwrap();
+        std::fs::write(
+            &p.config,
+            "# keep\nheight_percent = 40 # inline\nunknown = 'x'\n",
+        )
+        .unwrap();
+        let s = SettingsStore::read(&p);
+        let out =
+            SettingsStore::write(&p, &s, &[(SettingKey::HeightPercent, SettingValue::U8(70))])
+                .unwrap();
+        assert!(out.text.contains("# keep"));
+        assert!(out.text.contains("unknown = 'x'"));
+        assert!(out.text.contains("70 # inline"));
+    }
+    #[test]
+    fn refuses_same_field_conflict() {
+        let p = temp();
+        std::fs::create_dir_all(p.config.parent().unwrap()).unwrap();
+        std::fs::write(&p.config, "height_percent=40").unwrap();
+        let s = SettingsStore::read(&p);
+        std::fs::write(&p.config, "height_percent=50").unwrap();
+        assert!(matches!(
+            SettingsStore::write(&p, &s, &[(SettingKey::HeightPercent, SettingValue::U8(60))]),
+            Err(StoreError::Conflict(_))
+        ));
+    }
+    #[test]
+    fn invalid_utf8_is_unreadable() {
+        let p = temp();
+        std::fs::create_dir_all(p.config.parent().unwrap()).unwrap();
+        std::fs::write(&p.config, [255]).unwrap();
+        assert!(matches!(
+            SettingsStore::read(&p).status,
+            ConfigStatus::Unreadable(_)
+        ));
+    }
+    #[test]
+    fn detects_unknown_keys_and_field_types_but_uses_full_config_validation() {
+        let p = temp();
+        std::fs::create_dir_all(p.config.parent().unwrap()).unwrap();
+        std::fs::write(
+            &p.config,
+            "height_percent=101\nwidth_percent='bad'\nextra=1",
+        )
+        .unwrap();
+        let s = SettingsStore::read(&p);
+        assert!(matches!(s.status, ConfigStatus::Invalid));
+        assert!(s
+            .fields
+            .iter()
+            .find(|f| f.key == SettingKey::HeightPercent)
+            .unwrap()
+            .error
+            .is_some());
+        assert!(s
+            .fields
+            .iter()
+            .find(|f| f.key == SettingKey::WidthPercent)
+            .unwrap()
+            .error
+            .is_some());
+        assert!(Config::from_toml_str(&s.text).is_err());
+    }
+    #[test]
+    fn supports_all_eleven_keys_and_rejects_bad_ranges() {
+        assert_eq!(SettingKey::ALL.len(), 11);
+        assert!(decode(SettingKey::HeightPercent, &toml::Value::Integer(101)).is_err());
+        assert!(decode(SettingKey::AnimationMs, &toml::Value::Integer(2001)).is_err());
+        assert!(decode(
+            SettingKey::Hotkey,
+            &toml::Value::String("Ctrl+NotAKey".into())
+        )
+        .is_err());
+    }
+    #[test]
+    fn preserves_unrelated_external_edit_and_does_not_rewrite_malformed_files() {
+        let p = temp();
+        std::fs::create_dir_all(p.config.parent().unwrap()).unwrap();
+        std::fs::write(&p.config, "height_percent=40\nwidth_percent=70\n").unwrap();
+        let snapshot = SettingsStore::read(&p);
+        std::fs::write(&p.config, "height_percent=40\nwidth_percent=80\n").unwrap();
+        let result = SettingsStore::write(
+            &p,
+            &snapshot,
+            &[(SettingKey::HeightPercent, SettingValue::U8(60))],
+        )
+        .unwrap();
+        assert!(result.text.contains("height_percent=60"));
+        assert!(result.text.contains("width_percent=80"));
+        std::fs::write(&p.config, "height_percent = ").unwrap();
+        let malformed = SettingsStore::read(&p);
+        assert!(matches!(malformed.status, ConfigStatus::Malformed(_)));
+        assert!(matches!(
+            SettingsStore::write(
+                &p,
+                &malformed,
+                &[(SettingKey::HeightPercent, SettingValue::U8(65))]
+            ),
+            Err(StoreError::Malformed(_))
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&p.config).unwrap(),
+            "height_percent = "
+        );
+    }
+    #[test]
+    fn creates_canonical_from_legacy_without_modifying_legacy() {
+        let p = temp();
+        std::fs::create_dir_all(p.legacy_config.parent().unwrap()).unwrap();
+        let legacy = b"# legacy\nheight_percent=40\n";
+        std::fs::write(&p.legacy_config, legacy).unwrap();
+        let snapshot = SettingsStore::read(&p);
+        assert_eq!(snapshot.path, p.legacy_config);
+        let saved = SettingsStore::write(
+            &p,
+            &snapshot,
+            &[(SettingKey::HeightPercent, SettingValue::U8(55))],
+        )
+        .unwrap();
+        assert_eq!(saved.path, p.config);
+        assert!(saved.text.contains("height_percent=55"));
+        assert_eq!(std::fs::read(&p.legacy_config).unwrap(), legacy);
+    }
+    fn temp() -> AppPaths {
+        let d = std::env::temp_dir().join(format!(
+            "regie-settings-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        AppPaths::new(d.as_path())
+    }
+}
