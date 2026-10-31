@@ -5,7 +5,7 @@
 //! and only the lock holder binds it, which gives the second launch a way to wake the panel.
 
 use std::fs::{File, TryLockError};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -54,8 +54,18 @@ impl Instance {
         let _ = std::fs::remove_file(&self.socket);
         let listener = UnixListener::bind(&self.socket)?;
         thread::spawn(move || {
-            for _ in listener.incoming().flatten() {
-                on_show();
+            for mut stream in listener.incoming().flatten() {
+                // Consume the existing four-byte request before closing the peer.
+                if stream
+                    .set_read_timeout(Some(Duration::from_millis(500)))
+                    .is_err()
+                {
+                    continue;
+                }
+                let mut request = [0; 4];
+                if stream.read_exact(&mut request).is_ok() && &request == b"show" {
+                    on_show();
+                }
             }
         });
         Ok(())
@@ -172,6 +182,26 @@ mod tests {
             .expect("the show request arrives");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn listener_keeps_connection_open_until_show_is_written() {
+        let dir = temp_dir("write");
+        let held = claim(&dir).unwrap().unwrap();
+        let (tx, rx) = mpsc::channel();
+        held.listen(move || {
+            let _ = tx.send(());
+        })
+        .unwrap();
+        let mut client = UnixStream::connect(dir.join(SOCKET_FILE)).unwrap();
+        assert!(
+            rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "listener must consume the request before closing the peer"
+        );
+        client.write_all(b"show").unwrap();
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        drop(held);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
