@@ -56,7 +56,15 @@ fn main() {
     }
     let config = loaded.config;
     let hotkey = config.hotkey().unwrap_or_else(|e| fail(&e));
-    let theme = terminal_profile::from_default_terminal().unwrap_or_default();
+    let resolved = regie::theme::resolve(
+        config.terminal_theme,
+        terminal_profile::from_default_terminal(),
+        terminal_profile::default_font(),
+    );
+    for notice in resolved.notices {
+        eprintln!("{notice}");
+    }
+    let theme = resolved.theme;
     let mut event_loop = EventLoopBuilder::<AppEvent>::with_user_event().build();
     #[cfg(target_os = "macos")]
     event_loop.set_activation_policy(ActivationPolicy::Accessory);

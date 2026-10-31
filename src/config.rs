@@ -22,6 +22,7 @@ setting_enum!(NewTabDirectory, Current, Home);
 setting_enum!(StartupTabs, New, Restore);
 setting_enum!(LastTabAction, New, Hide, Quit);
 setting_enum!(Appearance, System, Light, Dark);
+setting_enum!(TerminalThemeSource, Regie, Macos);
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -40,6 +41,7 @@ pub struct Config {
     pub startup_tabs: StartupTabs,
     pub last_tab_action: LastTabAction,
     pub appearance: Appearance,
+    pub terminal_theme: TerminalThemeSource,
 }
 
 pub const ANIMATION_MS_MAX: u32 = 2000;
@@ -60,6 +62,7 @@ impl Default for Config {
             startup_tabs: StartupTabs::default(),
             last_tab_action: LastTabAction::default(),
             appearance: Appearance::default(),
+            terminal_theme: TerminalThemeSource::default(),
         }
     }
 }
@@ -145,6 +148,21 @@ pub fn load(path: &Path) -> Result<Config, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_colors_are_selected_independently_of_ui_appearance() {
+        assert_eq!(
+            Config::from_toml_str("").unwrap().terminal_theme,
+            TerminalThemeSource::Regie
+        );
+        assert_eq!(
+            Config::from_toml_str("terminal_theme='macos'\nappearance='light'")
+                .unwrap()
+                .terminal_theme,
+            TerminalThemeSource::Macos
+        );
+        assert!(Config::from_toml_str("terminal_theme='system'").is_err());
+    }
 
     #[test]
     fn compatible_config_preserves_legacy_and_rejects_bad_canonical() {

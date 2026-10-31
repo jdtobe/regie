@@ -17,4 +17,9 @@ async function workspace(page, overrides = {}) {
   await page.setContent(html);
 }
 async function apply(page, ...messages) { await page.evaluate(messages => messages.forEach(message => window.regie.apply(message)), messages); }
-module.exports = {workspace, apply};
+async function generated_workspace(page, source = 'regie', appearance = 'system') {
+  await page.addInitScript(() => {window.messages=[]; window.ipc={postMessage: body => window.messages.push(JSON.parse(body))};});
+  await page.goto('about:blank');
+  await page.setContent(fs.readFileSync(path.join(root, 'target/terminal-fixtures', `${source}-${appearance}.html`), 'utf8'));
+}
+module.exports = {workspace, generated_workspace, apply};
