@@ -1,5 +1,10 @@
 # Regie roadmap
 
+The Regie identity, Descending Cue icons, Reveal controls and candidate Regie Dark
+default are implemented. [Native/workload acceptance](testing/regie.md) is pending;
+the palette is not frozen. A website, light terminal theme and Settings UI remain
+future work, not part of this preview.
+
 ## Goal
 
 Regie is a fast, native, always-available terminal that drops down from the top of the screen on a global hotkey, in the spirit of the console in Quake. macOS first, cross-platform if practical.

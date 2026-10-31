@@ -189,6 +189,9 @@ mod tests {
         assert_eq!(loaded.config.height_percent, 40);
         assert_eq!(loaded.config.width_percent, 75);
         assert!(loaded.notices.is_empty());
+        fs::write(&paths.config, "terminal_theme='macos'").unwrap();
+        let loaded = load_compatible(&paths).unwrap();
+        assert_eq!(loaded.config.terminal_theme, TerminalThemeSource::Macos);
         assert_eq!(fs::read(&paths.legacy_config).unwrap(), legacy);
         fs::remove_dir_all(home).unwrap();
     }

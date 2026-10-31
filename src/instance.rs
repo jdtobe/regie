@@ -143,6 +143,20 @@ mod tests {
                 })
                 .unwrap();
             assert!(claim(second).unwrap().is_none());
+            // Saving new-brand data must never replace the already owned runtime socket.
+            let paths = crate::app_paths::AppPaths::new(&home);
+            crate::tab_layout::save_atomic(
+                &paths.layout,
+                &crate::tab_layout::SavedLayout {
+                    version: 1,
+                    selected: 0,
+                    tabs: vec![crate::tab_layout::SavedTab {
+                        cwd: home.clone(),
+                        name: Default::default(),
+                    }],
+                },
+            )
+            .unwrap();
             request_show(second).unwrap();
             rx.recv_timeout(Duration::from_secs(2)).unwrap();
             drop(owner);

@@ -20,9 +20,9 @@ Regie is a macOS-first Quake-style drop-down terminal written in Rust. Press a h
 | Configuration | Hotkey, window size, hide on focus lost, animation time (config file only) |
 | Settings menu in the menubar | Not started |
 | Embedded terminal (shell + rendering) | Independent persistent login-shell sessions; active-tab WebGL with a DOM fallback |
-| Terminal colours and font | Follows the macOS Terminal default profile; changes apply on restart |
+| Terminal colours and font | Candidate Regie Dark default, optional macOS Terminal colors; readable profile font kept independently; restart to change |
 | Tabs | Bottom/top strip, names, cwd inheritance, close/quit confirmation, optional layout restoration |
-| Profiles | Later; terminal colours still follow the Terminal default profile |
+| Profiles | Later; color source selectable in config, no profile editor |
 | Linux / Windows | Not tested |
 
 Developed and tested on macOS only.
@@ -71,6 +71,13 @@ normal history files still work. Saved layout lives in
 `~/Library/Application Support/Regie/tabs.json`. Missing directories fall back to
 home with a notice.
 
+If the canonical layout is absent, restoration reads the old
+`~/Library/Application Support/Rake/tabs.json` with a notice. Future saves go to
+Regie; old layout bytes are left intact. Invalid/unreadable canonical entries do
+not silently roll back to legacy data. Lock/socket files deliberately remain in
+`~/Library/Application Support/Rake` so old/new copies exclude one another. There
+is no live-session transfer; quit old Rake yourself before trying the Regie build.
+
 ## Configure
 
 Optional. Create `~/.config/regie/config.toml`; if absent, Regie reads the old `~/.config/rake/config.toml` with a notice. No files are moved or overwritten. If neither exists, defaults apply. Changes need a restart. A bad canonical file stops the app rather than silently falling back.
@@ -99,11 +106,21 @@ new_tab_directory = "current"
 startup_tabs = "new"
 # Last tab closed: new (default), hide, or quit. Hidden-empty summons create a tab.
 last_tab_action = "new"
-# Regie controls only: system (default), light or dark. Terminal profile is separate.
+# Regie controls only: system (default), light or dark. Terminal colors are separate.
 appearance = "system"
+# Candidate Regie Dark (default), or macos to follow Terminal profile colors.
+terminal_theme = "regie"
 ```
 
 The panel opens at the configured size and cannot be resized by dragging.
+
+Regie Dark is an intentional default change, including for old config files with
+no `terminal_theme` key. Use `"macos"` to keep the previous color policy; unreadable
+profile colors fall back to Regie Dark with a notice. Both modes retain readable
+macOS Terminal font family/size, otherwise the existing monospace fallback. UI
+appearance never changes the terminal palette. The palette remains provisional:
+see [Regie acceptance and local preview](docs/testing/regie.md) and the
+[brand reference](docs/brand.md). A light terminal theme and Settings UI are deferred.
 
 Hotkey strings use the [`global-hotkey`](https://docs.rs/global-hotkey) format, such as `Ctrl+Shift+K`, `Cmd+Backquote` or `F12`. Note that a global hotkey is captured system-wide, so the default `Ctrl+\`` will also stop working inside other apps that use it, such as editors.
 
