@@ -3,6 +3,12 @@ use crate::{
     settings_store::{ConfigSnapshot, ConfigStatus, SettingKey, SettingValue},
 };
 
+#[derive(Debug)]
+enum Operation {
+    Writing { generation: u64 },
+    Applying { generation: u64, config: Config },
+}
+
 #[derive(Debug, Clone)]
 pub enum SettingsEffect {
     Write {
@@ -37,7 +43,10 @@ pub struct SettingsController {
     active: Config,
     desired: Config,
     generation: u64,
-    pending: Option<(u64, ConfigSnapshot)>,
+    operation: Option<Operation>,
+    queued_changes: Vec<(SettingKey, SettingValue)>,
+    inflight_changes: Vec<(SettingKey, SettingValue)>,
+    deferred_external: Option<ConfigSnapshot>,
     warning: Option<String>,
 }
 
@@ -54,9 +63,16 @@ impl SettingsController {
                 _ => active.clone(),
             }),
             snapshot,
-            active,
+            active: if warning.is_some() {
+                Config::default()
+            } else {
+                active
+            },
             generation: 0,
-            pending: None,
+            operation: None,
+            queued_changes: vec![],
+            inflight_changes: vec![],
+            deferred_external: None,
             warning,
         }
     }
@@ -65,6 +81,9 @@ impl SettingsController {
     }
     pub fn active(&self) -> &Config {
         &self.active
+    }
+    pub fn draft(&self) -> &Config {
+        &self.desired
     }
     pub fn initial_effects(&self) -> Vec<SettingsEffect> {
         match &self.warning {
@@ -78,7 +97,6 @@ impl SettingsController {
     }
 
     pub fn edit(&mut self, key: SettingKey, value: SettingValue) -> Vec<SettingsEffect> {
-        self.generation += 1;
         let mut proposed = self.desired.clone();
         if !assign(&mut proposed, key, value.clone()) || !valid(&proposed) {
             return vec![
@@ -87,40 +105,45 @@ impl SettingsController {
             ];
         }
         self.desired = proposed;
-        self.pending = Some((self.generation, self.snapshot.clone()));
-        vec![
-            SettingsEffect::Write {
-                generation: self.generation,
-                changes: vec![(key, value)],
-            },
-            SettingsEffect::Render,
-        ]
+        queue_change(&mut self.queued_changes, key, value);
+        let mut effects = self.dispatch();
+        effects.push(SettingsEffect::Render);
+        effects
     }
 
     pub fn reset_all(&mut self) -> Vec<SettingsEffect> {
-        self.generation += 1;
         let defaults = Config::default();
         let changes = crate::settings_store::SettingKey::ALL
             .iter()
             .filter_map(|key| value_for(&defaults, *key).map(|v| (*key, v)))
             .collect();
         self.desired = defaults;
-        self.pending = Some((self.generation, self.snapshot.clone()));
-        vec![
-            SettingsEffect::Write {
-                generation: self.generation,
-                changes,
-            },
-            SettingsEffect::Render,
-        ]
+        self.queued_changes = changes;
+        let mut effects = self.dispatch();
+        effects.push(SettingsEffect::Render);
+        effects
     }
 
     pub fn external_change(&mut self, snapshot: ConfigSnapshot) -> Vec<SettingsEffect> {
+        if self.operation.is_some() {
+            if !matches!(snapshot.status, ConfigStatus::Valid(_)) {
+                let warning = status_error(&snapshot.status);
+                self.warning = Some(warning.clone());
+                self.deferred_external = Some(snapshot);
+                return vec![SettingsEffect::ShowWarning(warning), SettingsEffect::Render];
+            }
+            self.deferred_external = Some(snapshot);
+            return vec![SettingsEffect::Render];
+        }
         self.generation += 1;
         self.snapshot = snapshot;
         let mut effects = vec![SettingsEffect::Render];
         if let ConfigStatus::Valid(config) = &self.snapshot.status {
             self.desired = config.clone();
+            self.operation = Some(Operation::Applying {
+                generation: self.generation,
+                config: config.clone(),
+            });
             effects.insert(
                 0,
                 SettingsEffect::Apply {
@@ -139,22 +162,41 @@ impl SettingsController {
     pub fn finish(&mut self, result: SettingsResult) -> Vec<SettingsEffect> {
         match result {
             SettingsResult::Write { generation, result } => {
-                if self.pending.as_ref().map(|p| p.0) != Some(generation)
-                    || generation != self.generation
+                if !matches!(self.operation,Some(Operation::Writing{generation: active}) if active==generation)
                 {
                     return vec![];
                 }
+                self.operation = None;
+                if let Some(external) = self.deferred_external.take() {
+                    if result.is_err() {
+                        for (key, value) in std::mem::take(&mut self.inflight_changes) {
+                            queue_change(&mut self.queued_changes, key, value);
+                        }
+                    } else {
+                        self.inflight_changes.clear();
+                    }
+                    self.deferred_external = Some(external);
+                    let mut effects = self.dispatch();
+                    effects.push(SettingsEffect::Render);
+                    return effects;
+                }
                 match result {
                     Err(error) => {
+                        for (key, value) in std::mem::take(&mut self.inflight_changes) {
+                            queue_change(&mut self.queued_changes, key, value);
+                        }
                         self.warning = Some(error.clone());
                         vec![SettingsEffect::ShowError(error), SettingsEffect::Render]
                     }
                     Ok(snapshot) => {
+                        self.inflight_changes.clear();
                         self.snapshot = snapshot.clone();
                         match &snapshot.status {
                             ConfigStatus::Valid(config) => {
-                                self.desired = config.clone();
-                                self.pending = Some((generation, snapshot.clone()));
+                                self.operation = Some(Operation::Applying {
+                                    generation,
+                                    config: config.clone(),
+                                });
                                 vec![
                                     SettingsEffect::Apply {
                                         generation,
@@ -166,33 +208,97 @@ impl SettingsController {
                             _ => {
                                 let msg = status_error(&snapshot.status);
                                 self.warning = Some(msg.clone());
-                                self.pending = None;
-                                vec![SettingsEffect::ShowWarning(msg), SettingsEffect::Render]
+                                let mut effects = vec![SettingsEffect::ShowWarning(msg)];
+                                effects.extend(self.dispatch());
+                                effects.push(SettingsEffect::Render);
+                                effects
                             }
                         }
                     }
                 }
             }
             SettingsResult::Apply { generation, result } => {
-                if generation != self.generation {
+                let Some(Operation::Applying {
+                    generation: active,
+                    config,
+                }) = self.operation.take()
+                else {
+                    return vec![];
+                };
+                if generation != active {
+                    self.operation = Some(Operation::Applying {
+                        generation: active,
+                        config,
+                    });
                     return vec![];
                 }
                 match result {
                     Ok(()) => {
-                        if let ConfigStatus::Valid(config) = &self.snapshot.status {
-                            self.active = config.clone();
-                        }
+                        self.active = config;
                         self.warning = None;
-                        self.pending = None;
-                        vec![SettingsEffect::ClearWarning, SettingsEffect::Render]
+                        let mut effects = vec![SettingsEffect::ClearWarning];
+                        effects.extend(self.dispatch());
+                        effects.push(SettingsEffect::Render);
+                        effects
                     }
                     Err(error) => {
                         self.warning = Some(error.clone());
-                        vec![SettingsEffect::ShowError(error), SettingsEffect::Render]
+                        let mut effects = vec![SettingsEffect::ShowError(error)];
+                        effects.extend(self.dispatch());
+                        effects.push(SettingsEffect::Render);
+                        effects
                     }
                 }
             }
         }
+    }
+
+    fn dispatch(&mut self) -> Vec<SettingsEffect> {
+        if self.operation.is_some() {
+            return vec![];
+        }
+        if let Some(snapshot) = self.deferred_external.take() {
+            self.snapshot = snapshot;
+            if let ConfigStatus::Valid(config) = &self.snapshot.status {
+                self.desired = config.clone();
+                self.generation += 1;
+                self.operation = Some(Operation::Applying {
+                    generation: self.generation,
+                    config: config.clone(),
+                });
+                return vec![SettingsEffect::Apply {
+                    generation: self.generation,
+                    config: config.clone(),
+                }];
+            }
+            let warning = status_error(&self.snapshot.status);
+            self.warning = Some(warning.clone());
+            return vec![SettingsEffect::ShowWarning(warning)];
+        }
+        if self.queued_changes.is_empty() {
+            return vec![];
+        }
+        self.generation += 1;
+        self.inflight_changes = std::mem::take(&mut self.queued_changes);
+        self.operation = Some(Operation::Writing {
+            generation: self.generation,
+        });
+        vec![SettingsEffect::Write {
+            generation: self.generation,
+            changes: self.inflight_changes.clone(),
+        }]
+    }
+}
+
+fn queue_change(
+    changes: &mut Vec<(SettingKey, SettingValue)>,
+    key: SettingKey,
+    value: SettingValue,
+) {
+    if let Some(found) = changes.iter_mut().find(|(existing, _)| *existing == key) {
+        found.1 = value;
+    } else {
+        changes.push((key, value));
     }
 }
 
@@ -400,12 +506,13 @@ mod tests {
         };
         let next = s.external_change(invalid_snapshot(ConfigStatus::Malformed("broken".into())));
         assert!(matches!(next[0], SettingsEffect::ShowWarning(_)));
-        assert!(s
-            .finish(SettingsResult::Write {
-                generation: g,
-                result: Ok(snap(Config::default()))
-            })
-            .is_empty());
+        let after_write = s.finish(SettingsResult::Write {
+            generation: g,
+            result: Ok(snap(Config::default())),
+        });
+        assert!(after_write
+            .iter()
+            .all(|effect| !matches!(effect, SettingsEffect::Apply { .. })));
         assert!(s
             .finish(SettingsResult::Apply {
                 generation: g,
@@ -522,10 +629,11 @@ mod tests {
         s.edit(SettingKey::WidthPercent, SettingValue::U8(70));
         assert!(s
             .finish(SettingsResult::Write {
-                generation: g,
-                result: Err("old failure".into())
+                generation: g + 100,
+                result: Err("out of order".into())
             })
             .is_empty());
+        assert!(matches!(s.operation,Some(Operation::Writing{generation}) if generation==g));
     }
     #[test]
     fn reset_all_writes_only_config_setting_keys() {
@@ -555,5 +663,103 @@ mod tests {
         });
         assert!(matches!(out[0], SettingsEffect::ShowError(_)));
         assert_eq!(s.active().height_percent, 40);
+    }
+    #[test]
+    fn edits_during_write_are_coalesced_and_dispatched_only_after_apply() {
+        let mut s = SettingsController::new(snap(Config::default()), Config::default());
+        let first = s.edit(SettingKey::HeightPercent, SettingValue::U8(55));
+        let g1 = match first[0] {
+            SettingsEffect::Write { generation, .. } => generation,
+            _ => panic!(),
+        };
+        let second = s.edit(SettingKey::WidthPercent, SettingValue::U8(75));
+        assert!(!second
+            .iter()
+            .any(|e| matches!(e, SettingsEffect::Write { .. })));
+        let apply = s.finish(SettingsResult::Write {
+            generation: g1,
+            result: Ok(snap(Config {
+                height_percent: 55,
+                ..Config::default()
+            })),
+        });
+        let ga = match apply[0] {
+            SettingsEffect::Apply { generation, .. } => generation,
+            _ => panic!(),
+        };
+        let next = s.finish(SettingsResult::Apply {
+            generation: ga,
+            result: Ok(()),
+        });
+        assert!(next.iter().any(|e|matches!(e,SettingsEffect::Write{changes,..} if changes.contains(&(SettingKey::WidthPercent,SettingValue::U8(75))))));
+    }
+    #[test]
+    fn invalid_startup_uses_safe_defaults_as_active_not_supplied_config() {
+        let supplied = Config {
+            height_percent: 77,
+            ..Config::default()
+        };
+        let s = SettingsController::new(
+            invalid_snapshot(ConfigStatus::Malformed("bad".into())),
+            supplied,
+        );
+        assert_eq!(s.active(), &Config::default());
+    }
+    #[test]
+    fn failed_write_reports_and_retains_draft_for_later_edit() {
+        let mut s = SettingsController::new(snap(Config::default()), Config::default());
+        let first = s.edit(SettingKey::HeightPercent, SettingValue::U8(55));
+        let g = match first[0] {
+            SettingsEffect::Write { generation, .. } => generation,
+            _ => panic!(),
+        };
+        let failed = s.finish(SettingsResult::Write {
+            generation: g,
+            result: Err("disk full".into()),
+        });
+        assert!(failed
+            .iter()
+            .any(|e| matches!(e, SettingsEffect::ShowError(_))));
+        assert_eq!(s.draft().height_percent, 55);
+        let next = s.edit(SettingKey::WidthPercent, SettingValue::U8(75));
+        assert!(next.iter().any(|e|matches!(e,SettingsEffect::Write{changes,..} if changes.contains(&(SettingKey::HeightPercent,SettingValue::U8(55))))));
+    }
+    #[test]
+    fn newer_external_change_waits_for_prior_apply_and_wins_without_regression() {
+        let mut s = SettingsController::new(snap(Config::default()), Config::default());
+        let first = Config {
+            height_percent: 55,
+            ..Config::default()
+        };
+        let first_effect = s.external_change(snap(first.clone()));
+        let g1 = match first_effect[0] {
+            SettingsEffect::Apply { generation, .. } => generation,
+            _ => panic!(),
+        };
+        let newer = Config {
+            height_percent: 65,
+            ..Config::default()
+        };
+        assert!(s
+            .external_change(snap(newer.clone()))
+            .iter()
+            .all(|e| !matches!(e, SettingsEffect::Apply { .. })));
+        let next = s.finish(SettingsResult::Apply {
+            generation: g1,
+            result: Ok(()),
+        });
+        assert_eq!(s.active(), &first);
+        let g2 = next
+            .iter()
+            .find_map(|e| match e {
+                SettingsEffect::Apply { generation, .. } => Some(*generation),
+                _ => None,
+            })
+            .unwrap();
+        s.finish(SettingsResult::Apply {
+            generation: g2,
+            result: Ok(()),
+        });
+        assert_eq!(s.active(), &newer);
     }
 }
