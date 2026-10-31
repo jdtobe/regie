@@ -40,6 +40,7 @@ pub enum SettingsResult {
 
 pub struct SettingsController {
     snapshot: ConfigSnapshot,
+    reconciliation_base: ConfigSnapshot,
     active: Config,
     desired: Config,
     generation: u64,
@@ -61,6 +62,7 @@ impl SettingsController {
             ConfigStatus::Malformed(e) | ConfigStatus::Unreadable(e) => Some(e.clone()),
         };
         Self {
+            reconciliation_base: snapshot.clone(),
             desired: snapshot_fields_config(&snapshot).unwrap_or_else(|| match &snapshot.status {
                 ConfigStatus::Valid(c) => c.clone(),
                 _ => active.clone(),
@@ -87,9 +89,20 @@ impl SettingsController {
 
     /// Retry explicitly retained edits after a failed write.
     pub fn retry(&mut self) -> Vec<SettingsEffect> {
+        if !self.can_retry() {
+            return vec![SettingsEffect::ShowWarning("Pending settings cannot be retried until configuration is valid and no operation is running.".into()),SettingsEffect::Render];
+        }
         let mut effects = self.dispatch();
         effects.push(SettingsEffect::Render);
         effects
+    }
+    pub fn has_retryable_changes(&self) -> bool {
+        !self.queued_changes.is_empty()
+    }
+    pub fn can_retry(&self) -> bool {
+        self.operation.is_none()
+            && !self.queued_changes.is_empty()
+            && matches!(self.snapshot.status, ConfigStatus::Valid(_))
     }
     pub fn initial_effects(&self) -> Vec<SettingsEffect> {
         match &self.warning {
@@ -141,27 +154,9 @@ impl SettingsController {
             self.deferred_external = Some(snapshot);
             return vec![SettingsEffect::Render];
         }
-        self.generation += 1;
-        self.snapshot = snapshot;
-        let mut effects = vec![SettingsEffect::Render];
-        if let ConfigStatus::Valid(config) = &self.snapshot.status {
-            self.desired = config.clone();
-            self.operation = Some(Operation::Applying {
-                generation: self.generation,
-                config: config.clone(),
-            });
-            effects.insert(
-                0,
-                SettingsEffect::Apply {
-                    generation: self.generation,
-                    config: config.clone(),
-                },
-            );
-        } else {
-            let text = status_error(&self.snapshot.status);
-            self.warning = Some(text.clone());
-            effects.insert(0, SettingsEffect::ShowWarning(text));
-        }
+        self.deferred_external = Some(snapshot);
+        let mut effects = self.dispatch();
+        effects.push(SettingsEffect::Render);
         effects
     }
 
@@ -201,6 +196,7 @@ impl SettingsController {
                         self.snapshot = snapshot.clone();
                         match &snapshot.status {
                             ConfigStatus::Valid(config) => {
+                                self.reconciliation_base = snapshot.clone();
                                 self.operation = Some(Operation::Applying {
                                     generation,
                                     config: config.clone(),
@@ -266,10 +262,11 @@ impl SettingsController {
             return vec![];
         }
         if let Some(snapshot) = self.deferred_external.take() {
-            let previous = self.snapshot.clone();
+            let previous = self.reconciliation_base.clone();
             self.snapshot = snapshot;
             if let ConfigStatus::Valid(config) = &self.snapshot.status {
                 let config = config.clone();
+                self.reconciliation_base = self.snapshot.clone();
                 let mut conflicts = Vec::new();
                 self.queued_changes.retain(|(key, _)| {
                     let before = snapshot_value(&previous, *key);
@@ -307,10 +304,6 @@ impl SettingsController {
             }
             let warning = status_error(&self.snapshot.status);
             self.warning = Some(warning.clone());
-            self.queued_changes.clear();
-            self.inflight_changes.clear();
-            self.desired =
-                snapshot_fields_config(&self.snapshot).unwrap_or_else(|| self.active.clone());
             return vec![SettingsEffect::ShowWarning(warning)];
         }
         if self.queued_changes.is_empty() {
@@ -881,5 +874,100 @@ mod tests {
         let retry = s.retry();
         assert!(retry.iter().any(|e|matches!(e,SettingsEffect::Write{changes,..} if changes.contains(&(SettingKey::HeightPercent,SettingValue::U8(65))))));
         assert!(!retry.iter().any(|e|matches!(e,SettingsEffect::Write{changes,..} if changes.contains(&(SettingKey::HeightPercent,SettingValue::U8(55))))));
+    }
+    #[test]
+    fn invalid_deferred_external_keeps_failed_edits_available_for_explicit_retry() {
+        let mut s = SettingsController::new(snap(Config::default()), Config::default());
+        let e = s.edit(SettingKey::HeightPercent, SettingValue::U8(55));
+        let g = match e[0] {
+            SettingsEffect::Write { generation, .. } => generation,
+            _ => panic!(),
+        };
+        s.external_change(invalid_snapshot(ConfigStatus::Malformed("broken".into())));
+        s.finish(SettingsResult::Write {
+            generation: g,
+            result: Err("temporary".into()),
+        });
+        assert!(s.has_retryable_changes());
+        assert!(!s.can_retry());
+        let apply = s.external_change(snap(Config::default()));
+        let ga = apply
+            .iter()
+            .find_map(|e| match e {
+                SettingsEffect::Apply { generation, .. } => Some(*generation),
+                _ => None,
+            })
+            .unwrap();
+        let retry = s.finish(SettingsResult::Apply {
+            generation: ga,
+            result: Ok(()),
+        });
+        assert!(retry.iter().any(|effect|matches!(effect,SettingsEffect::Write{changes,..} if changes.contains(&(SettingKey::HeightPercent,SettingValue::U8(55))))));
+    }
+    #[test]
+    fn valid_deferred_external_applies_then_persists_nonconflicting_queued_edit() {
+        let mut s = SettingsController::new(snap(Config::default()), Config::default());
+        let e = s.edit(SettingKey::WidthPercent, SettingValue::U8(70));
+        let gw = match e[0] {
+            SettingsEffect::Write { generation, .. } => generation,
+            _ => panic!(),
+        };
+        s.edit(SettingKey::HeightPercent, SettingValue::U8(55));
+        let external = Config {
+            width_percent: 80,
+            ..Config::default()
+        };
+        s.external_change(snap(external.clone()));
+        let apply = s.finish(SettingsResult::Write {
+            generation: gw,
+            result: Ok(snap(Config {
+                width_percent: 70,
+                ..Config::default()
+            })),
+        });
+        let ga = apply
+            .iter()
+            .find_map(|e| match e {
+                SettingsEffect::Apply { generation, .. } => Some(*generation),
+                _ => None,
+            })
+            .unwrap();
+        let write = s.finish(SettingsResult::Apply {
+            generation: ga,
+            result: Ok(()),
+        });
+        let (g2, changes) = write
+            .iter()
+            .find_map(|e| match e {
+                SettingsEffect::Write {
+                    generation,
+                    changes,
+                } => Some((*generation, changes)),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            changes,
+            &vec![(SettingKey::HeightPercent, SettingValue::U8(55))]
+        );
+        let saved = Config {
+            height_percent: 55,
+            width_percent: 80,
+            ..Config::default()
+        };
+        let apply2 = s.finish(SettingsResult::Write {
+            generation: g2,
+            result: Ok(snap(saved.clone())),
+        });
+        let ga2 = match apply2[0] {
+            SettingsEffect::Apply { generation, .. } => generation,
+            _ => panic!(),
+        };
+        s.finish(SettingsResult::Apply {
+            generation: ga2,
+            result: Ok(()),
+        });
+        assert_eq!(s.active(), &saved);
+        assert_eq!(s.draft(), &saved);
     }
 }
