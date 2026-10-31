@@ -4,14 +4,15 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver, RecvTimeoutError, Sender},
+    sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError},
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::app_paths::AppPaths;
 
 const COALESCE_WINDOW: Duration = Duration::from_millis(40);
+const MAX_BURST_DURATION: Duration = Duration::from_millis(250);
 
 /// Keeps filesystem notifications active while settings files are edited externally.
 pub struct SettingsWatch {
@@ -29,6 +30,21 @@ pub enum SettingsWatchEvent {
 trait WatchAdapter: Send + 'static {
     fn watch(&mut self, path: &Path) -> Result<(), String>;
     fn unwatch(&mut self, path: &Path) -> Result<(), String>;
+}
+
+trait EventSource: Send + 'static {
+    fn recv_timeout(&self, timeout: Duration) -> Result<Result<(), String>, RecvTimeoutError>;
+    fn try_recv(&self) -> Result<Result<(), String>, TryRecvError>;
+}
+
+impl EventSource for Receiver<Result<(), String>> {
+    fn recv_timeout(&self, timeout: Duration) -> Result<Result<(), String>, RecvTimeoutError> {
+        Receiver::recv_timeout(self, timeout)
+    }
+
+    fn try_recv(&self) -> Result<Result<(), String>, TryRecvError> {
+        Receiver::try_recv(self)
+    }
 }
 
 struct NotifyAdapter(RecommendedWatcher);
@@ -80,7 +96,7 @@ fn spawn_worker(
     paths: AppPaths,
     backend: impl WatchAdapter,
     watched: Vec<PathBuf>,
-    events_rx: Receiver<Result<(), String>>,
+    events_rx: impl EventSource,
     wake: impl Fn(SettingsWatchEvent) + Send + Sync + 'static,
 ) -> Result<SettingsWatch, String> {
     let (stop_tx, stop_rx) = mpsc::channel();
@@ -128,46 +144,82 @@ fn watch_events(
     mut backend: impl WatchAdapter,
     paths: AppPaths,
     mut watched: Vec<PathBuf>,
-    events: Receiver<Result<(), String>>,
+    events: impl EventSource,
     stop: Receiver<()>,
     wake: impl Fn(SettingsWatchEvent) + Send + Sync + 'static,
 ) {
     loop {
         match events.recv_timeout(Duration::from_millis(50)) {
             Ok(event) => {
+                let burst_started = Instant::now();
                 let mut failure = event.err();
-                while let Ok(next) = events.try_recv() {
-                    collect_failure(&mut failure, next.err());
-                }
                 collect_failure(
                     &mut failure,
                     refresh_watches(&mut backend, &paths, &mut watched).err(),
                 );
-                // Debounce until the event stream is quiet; a wake marks the whole burst complete.
                 loop {
-                    match events.recv_timeout(COALESCE_WINDOW) {
-                        Ok(_) => {
-                            let mut next_failure = None;
-                            while let Ok(next) = events.try_recv() {
-                                collect_failure(&mut next_failure, next.err());
-                            }
-                            collect_failure(
-                                &mut next_failure,
-                                refresh_watches(&mut backend, &paths, &mut watched).err(),
-                            );
-                            collect_failure(&mut failure, next_failure);
-                        }
-                        Err(RecvTimeoutError::Timeout) => {
-                            wake(match failure {
-                                Some(error) => SettingsWatchEvent::Failed(error),
-                                None => SettingsWatchEvent::Changed,
-                            });
-                            break;
-                        }
-                        Err(RecvTimeoutError::Disconnected) => return,
-                    }
                     if stop.try_recv().is_ok() {
                         return;
+                    }
+                    if burst_started.elapsed() >= MAX_BURST_DURATION {
+                        wake(watch_result(failure));
+                        break;
+                    }
+
+                    let mut received = false;
+                    loop {
+                        if stop.try_recv().is_ok() {
+                            return;
+                        }
+                        if burst_started.elapsed() >= MAX_BURST_DURATION {
+                            break;
+                        }
+                        match events.try_recv() {
+                            Ok(next) => {
+                                received = true;
+                                collect_failure(&mut failure, next.err());
+                            }
+                            Err(TryRecvError::Empty) => break,
+                            Err(TryRecvError::Disconnected) => return,
+                        }
+                    }
+                    collect_failure(
+                        &mut failure,
+                        refresh_watches(&mut backend, &paths, &mut watched).err(),
+                    );
+                    if burst_started.elapsed() >= MAX_BURST_DURATION {
+                        wake(watch_result(failure));
+                        break;
+                    }
+                    if received {
+                        continue;
+                    }
+
+                    let remaining = MAX_BURST_DURATION.saturating_sub(burst_started.elapsed());
+                    match stop.recv_timeout(COALESCE_WINDOW.min(remaining)) {
+                        Ok(()) => return,
+                        Err(RecvTimeoutError::Disconnected) => return,
+                        Err(RecvTimeoutError::Timeout) => {
+                            if burst_started.elapsed() >= MAX_BURST_DURATION {
+                                wake(watch_result(failure));
+                                break;
+                            }
+                            // No queued event during the quiet window: this burst is complete.
+                            match events.try_recv() {
+                                Err(TryRecvError::Empty) => {
+                                    wake(watch_result(failure));
+                                    break;
+                                }
+                                Err(TryRecvError::Disconnected) => return,
+                                Ok(next) => {
+                                    collect_failure(&mut failure, next.err());
+                                    collect_failure(
+                                        &mut failure,
+                                        refresh_watches(&mut backend, &paths, &mut watched).err(),
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -178,6 +230,13 @@ fn watch_events(
             }
             Err(RecvTimeoutError::Disconnected) => return,
         }
+    }
+}
+
+fn watch_result(failure: Option<String>) -> SettingsWatchEvent {
+    match failure {
+        Some(error) => SettingsWatchEvent::Failed(error),
+        None => SettingsWatchEvent::Changed,
     }
 }
 
@@ -239,12 +298,18 @@ mod tests {
     use crate::{
         app_paths::AppPaths,
         settings_watch::{
-            directories_to_watch, spawn_worker, SettingsWatch, SettingsWatchEvent, WatchAdapter,
+            directories_to_watch, spawn_worker, EventSource, SettingsWatch, SettingsWatchEvent,
+            WatchAdapter,
         },
     };
     use std::{
         path::{Path, PathBuf},
-        sync::mpsc::{self, Receiver, Sender},
+        sync::mpsc::{self, Receiver, Sender, TryRecvError},
+        sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            Arc,
+        },
+        thread,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
@@ -299,17 +364,57 @@ mod tests {
         }
     }
 
+    struct SustainedEvents {
+        active: Arc<AtomicBool>,
+        polls: Arc<AtomicUsize>,
+        started: Sender<()>,
+        first: AtomicBool,
+    }
+
+    impl EventSource for SustainedEvents {
+        fn recv_timeout(
+            &self,
+            _timeout: Duration,
+        ) -> Result<Result<(), String>, mpsc::RecvTimeoutError> {
+            if !self.first.swap(true, Ordering::AcqRel) {
+                let _ = self.started.send(());
+            }
+            if self.active.load(Ordering::Acquire) {
+                Ok(Ok(()))
+            } else {
+                Err(mpsc::RecvTimeoutError::Timeout)
+            }
+        }
+
+        fn try_recv(&self) -> Result<Result<(), String>, TryRecvError> {
+            if self.active.load(Ordering::Acquire) {
+                self.polls.fetch_add(1, Ordering::AcqRel);
+                Ok(Ok(()))
+            } else {
+                Err(TryRecvError::Empty)
+            }
+        }
+    }
+
     fn start_test_watch(
         paths: AppPaths,
-        mut backend: TestBackend,
+        backend: TestBackend,
         events_rx: Receiver<Result<(), String>>,
+    ) -> (SettingsWatch, Receiver<SettingsWatchEvent>) {
+        start_test_watch_source(paths, backend, events_rx)
+    }
+
+    fn start_test_watch_source(
+        paths: AppPaths,
+        mut backend: TestBackend,
+        events: impl EventSource,
     ) -> (SettingsWatch, Receiver<SettingsWatchEvent>) {
         let watched = directories_to_watch(&paths);
         for path in &watched {
             backend.watch(path).unwrap();
         }
         let (wake_tx, wake_rx) = mpsc::channel();
-        let watch = spawn_worker(paths, backend, watched, events_rx, move |event| {
+        let watch = spawn_worker(paths, backend, watched, events, move |event| {
             let _ = wake_tx.send(event);
         })
         .unwrap();
@@ -366,6 +471,7 @@ mod tests {
         std::fs::write(&temp.paths().legacy_config, "height_percent=50").unwrap();
         let (_watch, receive) = watcher(&temp);
         std::fs::create_dir_all(temp.paths().config.parent().unwrap()).unwrap();
+        wake(&receive);
         std::fs::write(&temp.paths().config, "height_percent=60").unwrap();
         wake(&receive);
     }
@@ -439,6 +545,76 @@ mod tests {
                 if message.contains("injected watch registration failure")
         ));
         assert!(receive.recv_timeout(COALESCE_WINDOW * 2).is_err());
+    }
+
+    #[test]
+    fn drop_finishes_within_deadline_during_sustained_events() {
+        let temp = Temp::new();
+        let backend = TestBackend {
+            updates: mpsc::channel().0,
+            fail_watch: None,
+        };
+        let active = Arc::new(AtomicBool::new(true));
+        let polls = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = mpsc::channel();
+        let source = SustainedEvents {
+            active: active.clone(),
+            polls: polls.clone(),
+            started: started_tx,
+            first: AtomicBool::new(false),
+        };
+        let (watch, _receive) = start_test_watch_source(temp.paths(), backend, source);
+        started_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("event producer did not start");
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while polls.load(Ordering::Acquire) < 100 && std::time::Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(
+            polls.load(Ordering::Acquire) >= 100,
+            "event source was not being drained"
+        );
+
+        let (dropped_tx, dropped_rx) = mpsc::channel();
+        let dropper = thread::spawn(move || {
+            drop(watch);
+            let _ = dropped_tx.send(());
+        });
+        let finished = dropped_rx.recv_timeout(Duration::from_millis(500)).is_ok();
+        active.store(false, Ordering::Release);
+        if !finished {
+            dropped_rx
+                .recv_timeout(Duration::from_secs(3))
+                .expect("watcher did not stop after event stream ended");
+        }
+        dropper.join().unwrap();
+        assert!(finished, "drop waited for the event stream to become quiet");
+    }
+
+    #[test]
+    fn sustained_event_burst_emits_a_change_before_source_quiets() {
+        let temp = Temp::new();
+        let backend = TestBackend {
+            updates: mpsc::channel().0,
+            fail_watch: None,
+        };
+        let active = Arc::new(AtomicBool::new(true));
+        let (started_tx, started_rx) = mpsc::channel();
+        let source = SustainedEvents {
+            active: active.clone(),
+            polls: Arc::new(AtomicUsize::new(0)),
+            started: started_tx,
+            first: AtomicBool::new(false),
+        };
+        let (watch, receive) = start_test_watch_source(temp.paths(), backend, source);
+        started_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("event source did not start");
+        let event = receive.recv_timeout(Duration::from_secs(3));
+        active.store(false, Ordering::Release);
+        drop(watch);
+        assert!(matches!(event.unwrap(), SettingsWatchEvent::Changed));
     }
 
     #[test]
