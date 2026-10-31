@@ -51,6 +51,9 @@ pub struct SettingsController {
 }
 
 impl SettingsController {
+    /// `active` must be the configuration actually running in the app. In particular, startup
+    /// recovery wiring must pass `Config::default()` when the disk snapshot is invalid, because
+    /// those safe defaults are what the runtime was started with.
     pub fn new(snapshot: ConfigSnapshot, active: Config) -> Self {
         let warning = match &snapshot.status {
             ConfigStatus::Valid(_) => None,
@@ -63,11 +66,7 @@ impl SettingsController {
                 _ => active.clone(),
             }),
             snapshot,
-            active: if warning.is_some() {
-                Config::default()
-            } else {
-                active
-            },
+            active,
             generation: 0,
             operation: None,
             queued_changes: vec![],
@@ -84,6 +83,13 @@ impl SettingsController {
     }
     pub fn draft(&self) -> &Config {
         &self.desired
+    }
+
+    /// Retry explicitly retained edits after a failed write.
+    pub fn retry(&mut self) -> Vec<SettingsEffect> {
+        let mut effects = self.dispatch();
+        effects.push(SettingsEffect::Render);
+        effects
     }
     pub fn initial_effects(&self) -> Vec<SettingsEffect> {
         match &self.warning {
@@ -169,9 +175,10 @@ impl SettingsController {
                 self.operation = None;
                 if let Some(external) = self.deferred_external.take() {
                     if result.is_err() {
-                        for (key, value) in std::mem::take(&mut self.inflight_changes) {
-                            queue_change(&mut self.queued_changes, key, value);
-                        }
+                        retain_inflight_without_replacing_newer(
+                            &mut self.queued_changes,
+                            std::mem::take(&mut self.inflight_changes),
+                        );
                     } else {
                         self.inflight_changes.clear();
                     }
@@ -182,9 +189,10 @@ impl SettingsController {
                 }
                 match result {
                     Err(error) => {
-                        for (key, value) in std::mem::take(&mut self.inflight_changes) {
-                            queue_change(&mut self.queued_changes, key, value);
-                        }
+                        retain_inflight_without_replacing_newer(
+                            &mut self.queued_changes,
+                            std::mem::take(&mut self.inflight_changes),
+                        );
                         self.warning = Some(error.clone());
                         vec![SettingsEffect::ShowError(error), SettingsEffect::Render]
                     }
@@ -258,21 +266,51 @@ impl SettingsController {
             return vec![];
         }
         if let Some(snapshot) = self.deferred_external.take() {
+            let previous = self.snapshot.clone();
             self.snapshot = snapshot;
             if let ConfigStatus::Valid(config) = &self.snapshot.status {
+                let config = config.clone();
+                let mut conflicts = Vec::new();
+                self.queued_changes.retain(|(key, _)| {
+                    let before = snapshot_value(&previous, *key);
+                    let external = value_for(&config, *key);
+                    let conflict = before.is_some() && before != external;
+                    if conflict {
+                        conflicts.push(*key);
+                    }
+                    !conflict
+                });
                 self.desired = config.clone();
+                for (key, value) in &self.queued_changes {
+                    assign(&mut self.desired, *key, value.clone());
+                }
                 self.generation += 1;
                 self.operation = Some(Operation::Applying {
                     generation: self.generation,
-                    config: config.clone(),
+                    config,
                 });
-                return vec![SettingsEffect::Apply {
+                let mut effects = if conflicts.is_empty() {
+                    vec![]
+                } else {
+                    vec![SettingsEffect::ShowError(format!(
+                        "External settings conflict on {conflicts:?}; review and edit again."
+                    ))]
+                };
+                effects.push(SettingsEffect::Apply {
                     generation: self.generation,
-                    config: config.clone(),
-                }];
+                    config: match &self.operation {
+                        Some(Operation::Applying { config, .. }) => config.clone(),
+                        _ => unreachable!(),
+                    },
+                });
+                return effects;
             }
             let warning = status_error(&self.snapshot.status);
             self.warning = Some(warning.clone());
+            self.queued_changes.clear();
+            self.inflight_changes.clear();
+            self.desired =
+                snapshot_fields_config(&self.snapshot).unwrap_or_else(|| self.active.clone());
             return vec![SettingsEffect::ShowWarning(warning)];
         }
         if self.queued_changes.is_empty() {
@@ -300,6 +338,29 @@ fn queue_change(
     } else {
         changes.push((key, value));
     }
+}
+
+fn retain_inflight_without_replacing_newer(
+    queued: &mut Vec<(SettingKey, SettingValue)>,
+    inflight: Vec<(SettingKey, SettingValue)>,
+) {
+    for (key, value) in inflight {
+        if !queued.iter().any(|(queued_key, _)| *queued_key == key) {
+            queued.push((key, value));
+        }
+    }
+}
+
+fn snapshot_value(snapshot: &ConfigSnapshot, key: SettingKey) -> Option<SettingValue> {
+    snapshot
+        .fields
+        .iter()
+        .find(|field| field.key == key)
+        .and_then(|field| field.value.clone())
+        .or_else(|| match &snapshot.status {
+            ConfigStatus::Valid(config) => value_for(config, key),
+            _ => None,
+        })
 }
 
 fn status_error(status: &ConfigStatus) -> String {
@@ -694,16 +755,16 @@ mod tests {
         assert!(next.iter().any(|e|matches!(e,SettingsEffect::Write{changes,..} if changes.contains(&(SettingKey::WidthPercent,SettingValue::U8(75))))));
     }
     #[test]
-    fn invalid_startup_uses_safe_defaults_as_active_not_supplied_config() {
+    fn invalid_startup_keeps_constructor_active_as_actual_runtime_state() {
         let supplied = Config {
             height_percent: 77,
             ..Config::default()
         };
         let s = SettingsController::new(
             invalid_snapshot(ConfigStatus::Malformed("bad".into())),
-            supplied,
+            supplied.clone(),
         );
-        assert_eq!(s.active(), &Config::default());
+        assert_eq!(s.active(), &supplied);
     }
     #[test]
     fn failed_write_reports_and_retains_draft_for_later_edit() {
@@ -761,5 +822,64 @@ mod tests {
             result: Ok(()),
         });
         assert_eq!(s.active(), &newer);
+    }
+    #[test]
+    fn failed_write_requires_explicit_retry() {
+        let mut s = SettingsController::new(snap(Config::default()), Config::default());
+        let e = s.edit(SettingKey::HeightPercent, SettingValue::U8(55));
+        let g = match e[0] {
+            SettingsEffect::Write { generation, .. } => generation,
+            _ => panic!(),
+        };
+        s.finish(SettingsResult::Write {
+            generation: g,
+            result: Err("offline".into()),
+        });
+        assert!(s.retry().iter().any(|e|matches!(e,SettingsEffect::Write{changes,..} if changes.contains(&(SettingKey::HeightPercent,SettingValue::U8(55))))));
+    }
+    #[test]
+    fn external_snapshot_reconciles_queued_changes_and_reports_same_field_conflict() {
+        let mut s = SettingsController::new(snap(Config::default()), Config::default());
+        let first = s.edit(SettingKey::WidthPercent, SettingValue::U8(70));
+        let g = match first[0] {
+            SettingsEffect::Write { generation, .. } => generation,
+            _ => panic!(),
+        };
+        s.edit(SettingKey::HeightPercent, SettingValue::U8(55));
+        let ext = Config {
+            height_percent: 65,
+            width_percent: 80,
+            ..Config::default()
+        };
+        s.external_change(snap(ext.clone()));
+        let resolved = s.finish(SettingsResult::Write {
+            generation: g,
+            result: Ok(snap(Config {
+                width_percent: 70,
+                ..Config::default()
+            })),
+        });
+        assert!(resolved
+            .iter()
+            .any(|e| matches!(e,SettingsEffect::ShowError(msg) if msg.contains("HeightPercent"))));
+        assert_eq!(s.draft(), &ext);
+        assert!(s.queued_changes.is_empty());
+    }
+    #[test]
+    fn old_failed_same_key_write_does_not_replace_newer_queued_edit() {
+        let mut s = SettingsController::new(snap(Config::default()), Config::default());
+        let first = s.edit(SettingKey::HeightPercent, SettingValue::U8(55));
+        let g = match first[0] {
+            SettingsEffect::Write { generation, .. } => generation,
+            _ => panic!(),
+        };
+        s.edit(SettingKey::HeightPercent, SettingValue::U8(65));
+        s.finish(SettingsResult::Write {
+            generation: g,
+            result: Err("offline".into()),
+        });
+        let retry = s.retry();
+        assert!(retry.iter().any(|e|matches!(e,SettingsEffect::Write{changes,..} if changes.contains(&(SettingKey::HeightPercent,SettingValue::U8(65))))));
+        assert!(!retry.iter().any(|e|matches!(e,SettingsEffect::Write{changes,..} if changes.contains(&(SettingKey::HeightPercent,SettingValue::U8(55))))));
     }
 }
