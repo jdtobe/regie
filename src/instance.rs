@@ -18,11 +18,6 @@ pub const SOCKET_FILE: &str = "instance.sock";
 const CONNECT_ATTEMPTS: u32 = 20;
 const CONNECT_PAUSE: Duration = Duration::from_millis(25);
 
-/// Where Rake keeps its instance lock and socket, next to the configuration for the same user.
-pub fn state_dir(home: &Path) -> PathBuf {
-    home.join("Library/Application Support/Rake")
-}
-
 /// The running copy's claim on the app. Dropping it releases the lock and removes the socket.
 pub struct Instance {
     _lock: File,
@@ -94,6 +89,43 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn old_and_new_clients_exclude_each_other_in_both_orders() {
+        for old_first in [true, false] {
+            // The full macOS TMPDIR plus Application Support exceeds sockaddr_un.
+            // A short, uniquely owned test HOME keeps the real compatibility suffix.
+            let home = PathBuf::from("/tmp").join(format!(
+                "rg-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir(&home).unwrap();
+            let old = home.join("Library/Application Support/Rake");
+            let new = crate::app_paths::AppPaths::new(&home).runtime;
+            let (first, second) = if old_first {
+                (&old, &new)
+            } else {
+                (&new, &old)
+            };
+            let owner = claim(first).unwrap().unwrap();
+            let (tx, rx) = mpsc::channel();
+            owner
+                .listen(move || {
+                    let _ = tx.send(());
+                })
+                .unwrap();
+            assert!(claim(second).unwrap().is_none());
+            request_show(second).unwrap();
+            rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            drop(owner);
+            assert!(claim(second).unwrap().is_some());
+            std::fs::remove_dir_all(home).unwrap();
+        }
+    }
 
     fn temp_dir(name: &str) -> PathBuf {
         let nanos = SystemTime::now()

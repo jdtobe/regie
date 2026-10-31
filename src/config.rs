@@ -1,4 +1,4 @@
-//! User configuration, read once at startup from `~/.config/rake/config.toml`.
+//! Configuration read at startup, with a read-only legacy path fallback.
 
 use std::fs;
 use std::io::ErrorKind;
@@ -100,7 +100,35 @@ impl Config {
 }
 
 pub fn config_path(home: &Path) -> PathBuf {
-    home.join(".config").join("rake").join("config.toml")
+    crate::app_paths::AppPaths::new(home).config
+}
+
+pub struct LoadedConfig {
+    pub config: Config,
+    pub notices: Vec<String>,
+}
+
+pub fn load_compatible(paths: &crate::app_paths::AppPaths) -> Result<LoadedConfig, String> {
+    let Some(file) = crate::app_paths::read_preferred(&paths.config, &paths.legacy_config)? else {
+        return Ok(LoadedConfig {
+            config: Config::default(),
+            notices: vec![],
+        });
+    };
+    let text = std::str::from_utf8(&file.bytes)
+        .map_err(|e| format!("invalid config {}: {e}", file.path.display()))?;
+    let config = Config::from_toml_str(text)
+        .map_err(|e| format!("invalid config {}: {e}", file.path.display()))?;
+    let notices = if file.legacy {
+        vec![format!(
+            "Using legacy config {}; new config belongs at {}",
+            file.path.display(),
+            paths.config.display()
+        )]
+    } else {
+        vec![]
+    };
+    Ok(LoadedConfig { config, notices })
 }
 
 /// Load the config at `path`. A missing file means defaults; any other problem is an error
@@ -117,6 +145,35 @@ pub fn load(path: &Path) -> Result<Config, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compatible_config_preserves_legacy_and_rejects_bad_canonical() {
+        let marker = temp_file("compatible", None);
+        let home = marker.parent().unwrap();
+        let paths = crate::app_paths::AppPaths::new(home);
+        fs::create_dir_all(paths.legacy_config.parent().unwrap()).unwrap();
+        let legacy = b"height_percent=63";
+        fs::write(&paths.legacy_config, legacy).unwrap();
+        let loaded = load_compatible(&paths).unwrap();
+        assert_eq!(loaded.config.height_percent, 63);
+        assert!(loaded
+            .notices
+            .join(" ")
+            .contains(&paths.legacy_config.display().to_string()));
+        assert!(!paths.config.exists());
+        fs::create_dir_all(paths.config.parent().unwrap()).unwrap();
+        for bad in [b"height_percent='wrong'".as_slice(), &[255]] {
+            fs::write(&paths.config, bad).unwrap();
+            assert!(load_compatible(&paths).is_err());
+        }
+        fs::write(&paths.config, "width_percent=75").unwrap();
+        let loaded = load_compatible(&paths).unwrap();
+        assert_eq!(loaded.config.height_percent, 40);
+        assert_eq!(loaded.config.width_percent, 75);
+        assert!(loaded.notices.is_empty());
+        assert_eq!(fs::read(&paths.legacy_config).unwrap(), legacy);
+        fs::remove_dir_all(home).unwrap();
+    }
 
     #[test]
     fn tab_settings_default_and_accept_all_alternatives() {
@@ -269,10 +326,10 @@ mod tests {
     }
 
     #[test]
-    fn config_path_uses_rake_directory() {
+    fn config_path_uses_regie_directory() {
         assert_eq!(
             config_path(Path::new("/home/me")),
-            PathBuf::from("/home/me/.config/rake/config.toml")
+            PathBuf::from("/home/me/.config/regie/config.toml")
         );
     }
 

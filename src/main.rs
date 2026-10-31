@@ -1,5 +1,6 @@
 //! Main-thread OS wiring; session and tab policy live in Workspace.
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager};
+use rake::app_paths::AppPaths;
 use rake::app_ui::{self, AppCommand, AppUi};
 use rake::clipboard;
 use rake::config;
@@ -40,16 +41,20 @@ fn fail(message: &str) -> ! {
 fn main() {
     let home = std::env::var_os("HOME").unwrap_or_else(|| fail("HOME is required"));
     let home = Path::new(&home).to_path_buf();
-    let state_dir = instance::state_dir(&home);
-    let instance = match instance::claim(&state_dir) {
+    let paths = AppPaths::new(&home);
+    let instance = match instance::claim(&paths.runtime) {
         Ok(Some(instance)) => instance,
         Ok(None) => {
-            let _ = instance::request_show(&state_dir);
+            let _ = instance::request_show(&paths.runtime);
             return;
         }
         Err(error) => fail(&format!("could not guard against a second copy: {error}")),
     };
-    let config = config::load(&config::config_path(&home)).unwrap_or_else(|e| fail(&e));
+    let loaded = config::load_compatible(&paths).unwrap_or_else(|e| fail(&e));
+    for notice in loaded.notices {
+        eprintln!("{notice}");
+    }
+    let config = loaded.config;
     let hotkey = config.hotkey().unwrap_or_else(|e| fail(&e));
     let theme = terminal_profile::from_default_terminal().unwrap_or_default();
     let mut event_loop = EventLoopBuilder::<AppEvent>::with_user_event().build();
@@ -75,7 +80,7 @@ fn main() {
     output.set_waker(move || {
         let _ = wake_proxy.send_event(AppEvent::Wake);
     });
-    let mut workspace = Workspace::new(config.clone(), home, state_dir, output);
+    let mut workspace = Workspace::new(config.clone(), home, paths, output);
     let mut dropdown: Option<DropDown> = None;
     let mut tray: Option<TrayIcon> = None;
     let mut ui: Option<AppUi> = None;
