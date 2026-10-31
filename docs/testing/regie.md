@@ -34,7 +34,7 @@ Environment: macOS 27.0.1 (26A434), Apple Silicon; Rust 1.99.1/Cargo 1.99.1;
 Node 22.23.4, Playwright 1.56.1 pinned WebKit. Earlier development also ran under
 Node 26; the final gate explicitly used the checksum-verified Node 22 in scratch.
 
-- [x] 171 Rust unit tests and one production-document integration test; all targets
+- [x] 173 Rust unit tests and one production-document integration test; all targets
   and doc tests, strict locked Clippy and formatting.
 - [x] 24 WebKit tests: real generated documents, all sixteen foreground/background
   ANSI slots in **available WebGL and forced DOM fallback**, palette independence
@@ -50,6 +50,10 @@ Node 26; the final gate explicitly used the checksum-verified Node 22 in scratch
   mutation reproducing missing named ANSI keys fails both renderers before fixture
   regeneration passes. A discovered socket close-before-write race has a delayed
   writer regression and bounded nonblocking request read.
+- [x] Final independent review's important fallback finding reproduced using native
+  keyed archives: no decodable profile colors now trigger Regie Dark and a notice,
+  retaining the separately readable Menlo font. A readable partial profile keeps
+  neutral missing-field defaults, without Regie selection overlays.
 - [x] Native source assets inspected at 16/32/48/128/512/1024, 22/44 templates on
   light/dark preview surfaces. Native system tinting remains a hand check below.
 - [x] actionlint and ShellCheck; npm audit: zero vulnerabilities. cargo-audit 0.22.2
@@ -98,3 +102,23 @@ synthetic bold/dim/inverse/underline sample is likewise supplemental.
 Force Quit, logout/shutdown and external signals remain outside guaranteed quit
 confirmation. No claims of Linux/Windows application support. A light terminal
 theme, Settings UI, website deployment and remote repository rename remain future.
+
+## Final review notes
+
+One minor deferred: bold/dim/inverse/underline samples do not yet have localized
+pixel assertions for each attribute in both renderers. Their presence in a sample
+is not claimed as complete attribute verification.
+
+Execution decisions: the socket listener now consumes the existing `show` bytes
+before closing to prevent BrokenPipe; bounded reads can delay malformed local
+clients up to 500ms. The compatibility test permits up to 2s for a dropped lock to
+become reclaimable while concurrent PTY pre-exec children drain inherited CLOEXEC
+descriptors; this could mask sub-2s test release delays, not a persistent leaked lock.
+
+Review deliberately left Finder/About/menubar appearance, native launch/reopen and
+old/new process interaction, WKWebView focus/selection/cursor/resize/hide-show,
+real-job cancellation/restoration, named native utility/agent workloads and final
+palette acceptance to the pending user checklist. Cost: those native issues may
+still surface during daily use. Unsupported Linux/Windows behavior was not judged
+(no support claim); installation/notarisation/publication/repo rename/website were
+not attempted (separate authorization needed; no shipping/install proof implied).
