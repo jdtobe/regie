@@ -26,6 +26,15 @@ test('removed_tab_cannot_receive_late_output', async ({page}) => {
   expect(await page.locator('[data-terminal-id]').count()).toBe(0);
   expect(await page.evaluate(() => window.messages.some(m=>m.type==='output_ack'))).toBe(false);
 });
+test('inactive_session_receives_output_and_late_write_callback_is_ignored_after_removal', async ({page}) => {
+  await workspace(page);
+  await apply(page, {type:'create_tab',id:1}, {type:'create_tab',id:2}, {type:'select_tab',id:1}, output(2,1,'inactive-output'));
+  await apply(page, {type:'select_tab',id:2});
+  await expect(page.locator('[data-terminal-id="2"] .xterm-accessibility-tree')).toContainText('inactive-output');
+  await apply(page, output(2,2,'late-callback'), {type:'remove_tab',id:2});
+  await page.waitForTimeout(50);
+  expect(await page.evaluate(()=>window.messages.some(message=>message.type==='output_ack'&&message.sequence===2))).toBe(false);
+});
 test('paste_goes_to_requesting_id', async ({page}) => {
   await workspace(page);
   await apply(page,{type:'create_tab',id:1},{type:'create_tab',id:2},{type:'select_tab',id:2},{type:'paste',id:1,text:'hello'});

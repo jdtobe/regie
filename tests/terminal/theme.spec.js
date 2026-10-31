@@ -22,7 +22,7 @@ async function output(page, data) {
 }
 // Decode actual rendered pixels with the browser's PNG decoder, not xterm internals.
 async function pixels(page) {
-  const png = await page.locator('.xterm-screen').screenshot();
+  const png = await page.locator('.xterm-screen').first().screenshot();
   return page.evaluate(async base64 => {
     const image = new Image(); image.src = `data:image/png;base64,${base64}`; await image.decode();
     const canvas = document.createElement('canvas'); canvas.width=image.width; canvas.height=image.height;
@@ -86,6 +86,11 @@ test('theme_updates_all_existing_sessions_and_preserves_their_buffers', async ({
   expect(await page.locator('.xterm-screen').count()).toBe(2);
   const after = await page.locator('.xterm-screen').first().screenshot();
   expect(after.equals(before)).toBe(false);
+  expect((await pixels(page))['123456'] || 0).toBeGreaterThan(100);
+  await expect(page.locator('[data-terminal-id="1"] .xterm-accessibility-tree')).toContainText('persistent output');
+  expect(await page.locator('[data-terminal-id="1"] .xterm').evaluate(node=>getComputedStyle(node).fontFamily)).toContain('Menlo');
+  await apply(page,{type:'select_tab',id:2});
+  await expect(page.locator('[data-terminal-id="2"] .xterm')).toBeVisible();
 });
 
 test('regie_drag_selection_and_cursor_use_candidate_colors', async ({page}) => {

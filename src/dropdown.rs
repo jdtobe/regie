@@ -17,6 +17,18 @@ use crate::terminal_view::TerminalView;
 use crate::theme::TerminalTheme;
 use crate::APP_NAME;
 
+fn resized_panel(display: Display, width_percent: u8, height_percent: u8) -> (Rect, i32) {
+    let home = window_rect(
+        display.position,
+        display.size,
+        display.top_inset,
+        width_percent,
+        height_percent,
+    );
+    let hidden_y = display.position.1 - home.height as i32;
+    (home, hidden_y)
+}
+
 /// macOS keeps normal and floating windows below the menubar and silently clamps any frame that
 /// would go above it, which flattens the whole slide into one position. A window at the menubar's
 /// own level is not clamped, and the menubar is drawn in front of it, so the panel slides out
@@ -222,14 +234,9 @@ impl DropDown {
                     self.window.set_focus();
                     return;
                 };
-                let home = window_rect(
-                    display.position,
-                    display.size,
-                    display.top_inset,
-                    self.width_percent,
-                    self.height_percent,
-                );
-                self.hidden_y = display.position.1 - home.height as i32;
+                let (home, hidden_y) =
+                    resized_panel(display, self.width_percent, self.height_percent);
+                self.hidden_y = hidden_y;
                 home
             }
         };
@@ -370,5 +377,48 @@ impl DropDown {
     }
     pub fn is_focused(&self) -> bool {
         self.window.is_focused()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn panel_resize_recomputes_resting_and_hidden_positions_from_new_percentages() {
+        let display = Display {
+            position: (0, 0),
+            size: (1200, 800),
+            top_inset: 24,
+        };
+        let (home, hidden_y) = resized_panel(display, 75, 60);
+        assert_eq!(home.width, 900);
+        assert_eq!(home.height, 465);
+        assert_eq!(home.y, 24);
+        assert_eq!(hidden_y, -465);
+    }
+
+    #[test]
+    fn resize_animation_can_continue_from_current_position_to_new_endpoint() {
+        let now = Instant::now();
+        let (home, hidden_y) = resized_panel(
+            Display {
+                position: (0, 0),
+                size: (1000, 800),
+                top_inset: 20,
+            },
+            100,
+            70,
+        );
+        let current_y = 3;
+        let slide = Slide::toward(
+            now,
+            current_y,
+            home.y,
+            home.y.abs_diff(hidden_y),
+            Duration::from_millis(200),
+        );
+        assert_eq!(slide.y_at(now), current_y);
+        assert_eq!(slide.y_at(now + Duration::from_millis(500)), home.y);
     }
 }

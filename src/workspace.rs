@@ -639,6 +639,46 @@ mod tests {
             }
         )));
     }
+    #[test]
+    fn startup_mode_change_applies_to_the_next_start_only() {
+        let mut h = Harness::new(Config::default(), false);
+        crate::tab_layout::save_atomic(
+            &h.w.paths.layout,
+            &SavedLayout {
+                version: 1,
+                tabs: vec![SavedTab {
+                    cwd: PathBuf::from("/tmp"),
+                    name: Default::default(),
+                }],
+                selected: 0,
+            },
+        )
+        .unwrap();
+        let updated = Config {
+            startup_tabs: StartupTabs::Restore,
+            ..Config::default()
+        };
+        h.w.apply_config(&updated);
+        h.w.handle(WorkspaceCommand::Start);
+        assert_eq!(h.w.tabs.ordered().len(), 1);
+        assert_eq!(h.w.tabs.ordered()[0].cwd, PathBuf::from("/tmp"));
+    }
+    #[test]
+    fn runtime_new_tab_directory_applies_to_the_next_tab() {
+        let mut h = Harness::new(Config::default(), true);
+        h.command(
+            "stty -echo; cd /tmp; echo NEW_TAB_DIR_MARKER\n",
+            "NEW_TAB_DIR_MARKER",
+        );
+        let updated = Config {
+            new_tab_directory: NewTabDirectory::Home,
+            ..Config::default()
+        };
+        h.w.apply_config(&updated);
+        h.w.handle(WorkspaceCommand::Native(AppCommand::NewTab));
+        let new_tab = h.w.tabs.ordered().last().unwrap();
+        assert_eq!(new_tab.cwd, h.w.home);
+    }
     impl Drop for Harness {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.dir);

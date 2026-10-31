@@ -41,6 +41,15 @@ test('bottom_is_default_top_is_configurable',async({page})=>{
     expect(position==='bottom' ? strip.y>=term.y+term.height-1 : strip.y+strip.height<=term.y+1).toBe(true);
   }
 });
+test('appearance_and_bar_position_deliveries_update_the_existing_workspace',async({page})=>{
+  await workspace(page,{tab_position:'top',appearance:'light'});
+  await apply(page,{type:'create_tab',id:1},{type:'select_tab',id:1},metadata([tab(1)]));
+  await apply(page,{type:'tab_position',position:'bottom'},{type:'appearance',appearance:'dark'});
+  await expect(page.locator('body')).toHaveAttribute('data-appearance','dark');
+  await expect(page.locator('body')).toHaveAttribute('data-tab-position','bottom');
+  const strip=await page.locator('#tabstrip').boundingBox(), terminal=await page.locator('#terminal').boundingBox();
+  expect(strip.y).toBeGreaterThanOrEqual(terminal.y+terminal.height-1);
+});
 test('bar_visible_for_single_tab',async({page})=>{
   await workspace(page);await apply(page,metadata([tab(1)]));
   await expect(page.getByRole('tab',{name:'tab-1'})).toBeVisible();

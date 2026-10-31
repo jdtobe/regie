@@ -16,6 +16,29 @@ pub struct AppUi {
     _menubar: Menu,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeAppearance {
+    System,
+    Light,
+    Dark,
+}
+
+pub fn apply_appearance_with(appearance: Appearance, apply: impl FnOnce(NativeAppearance)) {
+    let native = match appearance {
+        Appearance::System => NativeAppearance::System,
+        Appearance::Light => NativeAppearance::Light,
+        Appearance::Dark => NativeAppearance::Dark,
+    };
+    apply(native);
+}
+
+pub fn apply_appearance(appearance: Appearance) {
+    #[cfg(target_os = "macos")]
+    set_appearance(appearance);
+    #[cfg(not(target_os = "macos"))]
+    let _ = appearance;
+}
+
 impl AppUi {
     pub fn new(
         on_command: impl Fn(AppCommand) + Send + Sync + 'static,
@@ -83,12 +106,18 @@ pub fn set_appearance(appearance: Appearance) {
         NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
     };
     let marker = MainThreadMarker::new().expect("AppKit runs on main thread");
-    let appearance = match appearance {
-        Appearance::System => None,
-        Appearance::Light => NSAppearance::appearanceNamed(unsafe { NSAppearanceNameAqua }),
-        Appearance::Dark => NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua }),
-    };
-    NSApplication::sharedApplication(marker).setAppearance(appearance.as_deref());
+    apply_appearance_with(appearance, |appearance| {
+        let appearance = match appearance {
+            NativeAppearance::System => None,
+            NativeAppearance::Light => {
+                NSAppearance::appearanceNamed(unsafe { NSAppearanceNameAqua })
+            }
+            NativeAppearance::Dark => {
+                NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua })
+            }
+        };
+        NSApplication::sharedApplication(marker).setAppearance(appearance.as_deref());
+    });
 }
 
 #[cfg(target_os = "macos")]
@@ -115,4 +144,23 @@ pub fn confirm_termination(names: &[String], appearance: Appearance) -> bool {
 #[cfg(not(target_os = "macos"))]
 pub fn confirm_termination(_: &[String], _: Appearance) -> bool {
     false
+}
+
+#[cfg(test)]
+mod appearance_tests {
+    use super::*;
+
+    #[test]
+    fn native_appearance_adapter_maps_each_choice_including_system() {
+        let cases = [
+            (Appearance::System, NativeAppearance::System),
+            (Appearance::Light, NativeAppearance::Light),
+            (Appearance::Dark, NativeAppearance::Dark),
+        ];
+        for (appearance, expected) in cases {
+            let mut applied = None;
+            apply_appearance_with(appearance, |value| applied = Some(value));
+            assert_eq!(applied, Some(expected));
+        }
+    }
 }
