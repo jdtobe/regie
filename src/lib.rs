@@ -30,7 +30,7 @@ use tray_icon::Icon;
 /// gives Retina real pixels, and the tray scales the image down to 22 points.
 pub const ICON_SIZE: u32 = 44;
 const ICON_SCALE: f32 = 2.0;
-pub const APP_NAME: &str = "Rake";
+pub const APP_NAME: &str = "Regie";
 
 /// RGBA pixels for the menubar icon: a filled bar above an outlined pane, black with alpha
 /// so macOS can use it as a template image and tint it for light and dark menubars.
@@ -212,9 +212,9 @@ mod tests {
     }
 
     #[test]
-    fn about_metadata_uses_rake_brand() {
+    fn about_metadata_uses_regie_brand() {
         let meta = about_metadata();
-        assert_eq!(meta.name.as_deref(), Some("Rake"));
+        assert_eq!(meta.name.as_deref(), Some("Regie"));
         assert_eq!(
             meta.version,
             Some(format!("v{}", env!("CARGO_PKG_VERSION")))

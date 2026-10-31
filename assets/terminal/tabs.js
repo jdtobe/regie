@@ -83,6 +83,6 @@ window.createTabStrip = (post, config) => {
       return;
     }
     const wasEditing=!!editor;editor=null;render();
-    if(wasEditing)window.rake?.focus(selected);
+    if(wasEditing)window.regie?.focus(selected);
   }};
 };

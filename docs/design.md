@@ -1,4 +1,4 @@
-# Rake design
+# Regie design
 
 ## Current architecture
 
@@ -45,7 +45,7 @@ Platform-specific code stays behind `cfg` gates and small functions so a second 
 
 **Clipboard.** The terminal page is loaded from an in-memory HTML string, so it has an opaque origin and is not a secure context; `navigator.clipboard` does not exist there. Copy and paste therefore travel over IPC: the page sends the selected text (or a paste request), and `src/clipboard.rs` reads and writes the native pasteboard. Paste is delivered back to the page so xterm.js applies bracketed-paste and key handling before the text reaches the shell.
 
-**Theme.** Rake reads the macOS Terminal default profile at startup and gives xterm.js its background, text and cursor colours, all 16 ANSI colours, and font family and size ([ADR 9](adr/0009-adopt-the-terminal-profile.md)). Values are injected into the bundled page as JSON; there is no theme IPC. If the profile cannot be read, Rake keeps its own dark look. Opacity, blur, background images and selection colour are not adopted, and profile changes apply on the next launch.
+**Theme.** Regie reads the macOS Terminal default profile at startup and gives xterm.js its background, text and cursor colours, all 16 ANSI colours, and font family and size ([ADR 9](adr/0009-adopt-the-terminal-profile.md)). Values are injected into the bundled page as JSON; there is no theme IPC. If the profile cannot be read, Regie keeps its own dark look. Opacity, blur, background images and selection colour are not adopted, and profile changes apply on the next launch.
 
 ## Complications we expect
 

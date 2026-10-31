@@ -1,5 +1,5 @@
 [package]
-name = "rake"
+name = "regie"
 version = "0.1.0"
 edition = "2021"
 description = "A macOS-first Quake-style drop-down terminal"

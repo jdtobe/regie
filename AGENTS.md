@@ -1,6 +1,6 @@
 # Agent Instructions
 
-A Rust, macOS-first Quake-style drop-down terminal. Read [README.md](README.md) for status and [docs/](docs/) for design, principles, roadmap and open questions.
+Regie is a Rust, macOS-first Quake-style drop-down terminal. Read [README.md](README.md) for status and [docs/](docs/) for design, principles, roadmap and open questions.
 
 ## Commands
 - `cargo run`: run the app (menubar icon)

@@ -45,8 +45,8 @@ class Versions(unittest.TestCase):
             self.assertNotEqual(self.next(period).returncode, 0, period)
 
     def fixture(self):
-        (self.root / 'Cargo.toml').write_text('[package]\nname = "rake"\nversion = "0.1.0"\n[dependencies.fake]\nversion = "9.9.9"\n')
-        (self.root / 'Cargo.lock').write_text('version = 4\n[[package]]\nname = "rake"\nversion = "0.1.0"\n[[package]]\nname = "fake"\nversion = "9.9.9"\n')
+        (self.root / 'Cargo.toml').write_text('[package]\nname = "regie"\nversion = "0.1.0"\n[dependencies.fake]\nversion = "9.9.9"\n')
+        (self.root / 'Cargo.lock').write_text('version = 4\n[[package]]\nname = "regie"\nversion = "0.1.0"\n[[package]]\nname = "fake"\nversion = "9.9.9"\n')
 
     def stamp(self, tag):
         return subprocess.run(['python3', str(STAMP), tag], cwd=self.root, capture_output=True, text=True)

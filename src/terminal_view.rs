@@ -12,7 +12,7 @@ const XTERM_CSS: &str = include_str!("../assets/terminal/xterm.css");
 const XTERM_JS: &str = include_str!("../assets/terminal/xterm.js");
 const ADDON_FIT_JS: &str = include_str!("../assets/terminal/addon-fit.js");
 const ADDON_WEBGL_JS: &str = include_str!("../assets/terminal/addon-webgl.js");
-const RAKE_JS: &str = include_str!("../assets/terminal/rake.js");
+const REGIE_JS: &str = include_str!("../assets/terminal/regie.js");
 const TABS_JS: &str = include_str!("../assets/terminal/tabs.js");
 const TABS_CSS: &str = include_str!("../assets/terminal/tabs.css");
 
@@ -30,7 +30,7 @@ pub fn workspace_html(theme: &TerminalTheme, config: &crate::config::Config) -> 
 }
 
 fn render_html(theme: &TerminalTheme, settings: &str) -> String {
-    let rake_js = RAKE_JS.replace("/*__RAKE_CONFIG__*/", settings);
+    let regie_js = REGIE_JS.replace("/*__REGIE_CONFIG__*/", settings);
     INDEX_HTML
         .replace("/*__THEME_BACKGROUND__*/", &theme.background.hex())
         .replace("/*__XTERM_CSS__*/", XTERM_CSS)
@@ -39,7 +39,7 @@ fn render_html(theme: &TerminalTheme, settings: &str) -> String {
         .replace("/*__XTERM_JS__*/", XTERM_JS)
         .replace("/*__ADDON_FIT_JS__*/", ADDON_FIT_JS)
         .replace("/*__ADDON_WEBGL_JS__*/", ADDON_WEBGL_JS)
-        .replace("/*__RAKE_JS__*/", &rake_js)
+        .replace("/*__REGIE_JS__*/", &regie_js)
 }
 
 fn navigation_allowed(url: &str) -> bool {
@@ -72,7 +72,7 @@ impl TerminalView {
 
     pub fn focus(&self) -> Result<(), String> {
         self.webview
-            .evaluate_script("window.rake?.focus();")
+            .evaluate_script("window.regie?.focus();")
             .map_err(|e| format!("could not focus terminal webview: {e}"))
     }
 
@@ -80,14 +80,14 @@ impl TerminalView {
         let json = serde_json::to_string(deliveries).map_err(|e| e.to_string())?;
         self.webview
             .evaluate_script(&format!(
-                "{json}.forEach(message => window.rake.apply(message));"
+                "{json}.forEach(message => window.regie.apply(message));"
             ))
             .map_err(|e| format!("could not update workspace: {e}"))
     }
 
     pub fn focus_session(&self, id: TabId) -> Result<(), String> {
         self.webview
-            .evaluate_script(&format!("window.rake?.focus({});", id.get()))
+            .evaluate_script(&format!("window.regie?.focus({});", id.get()))
             .map_err(|e| e.to_string())
     }
 
@@ -132,7 +132,7 @@ mod tests {
         assert!(html.contains(r##""fontSize":14.7"##));
         assert!(html.contains("background: #212121"));
         assert!(
-            !html.contains("__RAKE_CONFIG__"),
+            !html.contains("__REGIE_CONFIG__"),
             "theme placeholder left behind"
         );
         assert!(
@@ -142,11 +142,11 @@ mod tests {
     }
 
     #[test]
-    fn terminal_document_fills_the_window_and_installs_rake_bridge() {
+    fn terminal_document_fills_the_window_and_installs_regie_bridge() {
         let html = terminal_html(&TerminalTheme::default());
         assert!(html.contains("id=\"terminal\""));
         assert!(html.contains("height: 100%"));
-        assert!(html.contains("window.rake"));
+        assert!(html.contains("window.regie"));
         for operation in ["apply", "focus"] {
             assert!(html.contains(operation), "missing {operation}");
         }
@@ -176,7 +176,7 @@ mod tests {
             .find("WebglAddon")
             .expect("the addon bundle is missing");
         let app = html
-            .find("window.rake = {")
+            .find("window.regie = {")
             .expect("the app script is missing");
         assert!(
             addon < app,
