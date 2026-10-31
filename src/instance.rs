@@ -56,14 +56,28 @@ impl Instance {
         thread::spawn(move || {
             for mut stream in listener.incoming().flatten() {
                 // Consume the existing four-byte request before closing the peer.
-                if stream
-                    .set_read_timeout(Some(Duration::from_millis(500)))
-                    .is_err()
-                {
+                if stream.set_nonblocking(true).is_err() {
                     continue;
                 }
                 let mut request = [0; 4];
-                if stream.read_exact(&mut request).is_ok() && &request == b"show" {
+                let mut used = 0;
+                for _ in 0..CONNECT_ATTEMPTS {
+                    match stream.read(&mut request[used..]) {
+                        Ok(0) => break,
+                        Ok(count) => {
+                            used += count;
+                            if used == request.len() {
+                                break;
+                            }
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            thread::sleep(CONNECT_PAUSE)
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(_) => break,
+                    }
+                }
+                if used == request.len() && &request == b"show" {
                     on_show();
                 }
             }
