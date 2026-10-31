@@ -16,6 +16,7 @@ pub mod session_output;
 pub mod sessions;
 pub mod settings;
 pub mod settings_store;
+pub mod settings_watch;
 pub mod tab_layout;
 pub mod tabs;
 pub mod terminal_profile;
