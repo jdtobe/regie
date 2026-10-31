@@ -15,7 +15,7 @@ if ! printf '%s\n' "$version" | LC_ALL=C grep -Eq '^(0|[1-9][0-9]*)\.([1-9]|1[0-
 fi
 [ "$(uname -s)" = Darwin ] || { echo "DMG verification requires macOS" >&2; exit 1; }
 hdiutil verify "$image" >/dev/null
-scratch=$(mktemp -d "${TMPDIR:-/tmp}/rake-verify.XXXXXX")
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/regie-verify.XXXXXX")
 mounted=false
 cleanup() {
     result=$?
@@ -38,19 +38,19 @@ import plistlib
 import sys
 
 root, version = Path(sys.argv[1]), sys.argv[2]
-app = root / 'Rake.app'
+app = root / 'Regie.app'
 try:
     with (app / 'Contents/Info.plist').open('rb') as stream:
         info = plistlib.load(stream)
     for key in ('CFBundleVersion', 'CFBundleShortVersionString'):
         if info.get(key) != version:
             raise ValueError(f'{key} version does not match {version}')
-    for key, expected in {'CFBundleExecutable': 'rake', 'CFBundleIdentifier': 'com.jonathantobe.rake',
-                          'CFBundlePackageType': 'APPL', 'CFBundleIconFile': 'Rake',
+    for key, expected in {'CFBundleExecutable': 'regie', 'CFBundleIdentifier': 'com.jonathantobe.regie',
+                          'CFBundlePackageType': 'APPL', 'CFBundleIconFile': 'Regie',
                           'LSUIElement': True}.items():
         if info.get(key) != expected:
             raise ValueError(f'incorrect {key}')
-    icon = app / 'Contents/Resources/Rake.icns'
+    icon = app / 'Contents/Resources/Regie.icns'
     if not icon.is_file() or icon.read_bytes()[:4] != b'icns':
         raise ValueError('missing or invalid app icon')
     link = root / 'Applications'
@@ -59,9 +59,9 @@ try:
 except (OSError, ValueError, plistlib.InvalidFileException) as error:
     sys.exit(str(error))
 PY
-binary="$scratch/mount/Rake.app/Contents/MacOS/rake"
+binary="$scratch/mount/Regie.app/Contents/MacOS/regie"
 [ -x "$binary" ] || { echo "missing executable" >&2; exit 1; }
 [ "$(lipo -archs "$binary")" = arm64 ] || { echo "expected arm64 executable" >&2; exit 1; }
-codesign --verify --deep --strict "$scratch/mount/Rake.app"
-codesign -dv "$scratch/mount/Rake.app" 2>&1 | grep -q '^Signature=adhoc$'
+codesign --verify --deep --strict "$scratch/mount/Regie.app"
+codesign -dv "$scratch/mount/Regie.app" 2>&1 | grep -q '^Signature=adhoc$'
 shasum -a 256 "$image"

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Assemble Rake.app and a DMG from an already built release binary. Prints the DMG path.
+# Assemble Regie.app and a DMG from an already built release binary. Prints the DMG path.
 # Usage: scripts/package.sh [version]   (defaults to the version in Cargo.toml)
 set -eu
 
@@ -12,21 +12,21 @@ if ! printf '%s\n' "$version" | LC_ALL=C grep -Eq '^(0|[1-9][0-9]*)\.([1-9]|1[0-
     exit 1
 fi
 
-binary="target/release/rake"
+binary="target/release/regie"
 if [ ! -x "$binary" ]; then
     echo "build first: $binary is missing" >&2
     exit 1
 fi
 
 arch="$(uname -m)"
-app="dist/Rake.app"
+app="dist/Regie.app"
 staging="dist/.dmg"
-dmg="dist/Rake-v${version}-${arch}.dmg"
+dmg="dist/Regie-v${version}-${arch}.dmg"
 
 rm -rf "$app" "$staging"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$staging"
-cp "$binary" "$app/Contents/MacOS/rake"
-cp assets/icons/Rake.icns "$app/Contents/Resources/Rake.icns"
+cp "$binary" "$app/Contents/MacOS/regie"
+cp assets/icons/Regie.icns "$app/Contents/Resources/Regie.icns"
 
 cat > "$app/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -34,11 +34,11 @@ cat > "$app/Contents/Info.plist" <<EOF
 <plist version="1.0">
 <dict>
   <key>CFBundleDevelopmentRegion</key><string>en</string>
-  <key>CFBundleDisplayName</key><string>Rake</string>
-  <key>CFBundleName</key><string>Rake</string>
-  <key>CFBundleExecutable</key><string>rake</string>
-  <key>CFBundleIdentifier</key><string>com.jonathantobe.rake</string>
-  <key>CFBundleIconFile</key><string>Rake</string>
+  <key>CFBundleDisplayName</key><string>Regie</string>
+  <key>CFBundleName</key><string>Regie</string>
+  <key>CFBundleExecutable</key><string>regie</string>
+  <key>CFBundleIdentifier</key><string>com.jonathantobe.regie</string>
+  <key>CFBundleIconFile</key><string>Regie</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${version}</string>
@@ -56,9 +56,9 @@ plutil -lint "$app/Contents/Info.plist" >/dev/null
 codesign --force --sign - "$app"
 
 # Drag-to-install layout.
-ditto "$app" "$staging/Rake.app"
+ditto "$app" "$staging/Regie.app"
 ln -s /Applications "$staging/Applications"
-hdiutil create -quiet -volname Rake -srcfolder "$staging" -ov -format UDZO "$dmg"
+hdiutil create -quiet -volname Regie -srcfolder "$staging" -ov -format UDZO "$dmg"
 rm -rf "$staging"
 
 echo "$dmg"

@@ -84,7 +84,7 @@ test('rename_survives_async_selection_round_trips',async({page})=>{
     await page.evaluate(delay=>{
       const original=window.ipc.postMessage;
       window.ipc.postMessage=body=>{original(body);const message=JSON.parse(body);
-        if(message.type==='select_tab')setTimeout(()=>{window.rake.apply({type:'select_tab',id:message.id});window.rake.apply({type:'tab_metadata',tabs:[1,2].map(id=>({id,title:`tab-${id}`,manual:null,busy:false})),active:message.id});},delay);
+        if(message.type==='select_tab')setTimeout(()=>{window.regie.apply({type:'select_tab',id:message.id});window.regie.apply({type:'tab_metadata',tabs:[1,2].map(id=>({id,title:`tab-${id}`,manual:null,busy:false})),active:message.id});},delay);
       };
     },delay);
     await page.getByText('tab-2',{exact:true}).dblclick();

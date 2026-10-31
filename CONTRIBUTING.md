@@ -1,6 +1,6 @@
 # Contributing
 
-Rake is a macOS-first drop-down terminal written in Rust. Contributions are welcome, including bug reports and documentation fixes.
+Regie is a macOS-first drop-down terminal written in Rust. Contributions are welcome, including bug reports and documentation fixes.
 
 ## Before you start
 
@@ -42,4 +42,4 @@ cargo test --doc
 
 ## Licence
 
-Rake is released under the [MIT licence](LICENSE). By contributing you agree that your contribution is licensed under the same terms.
+Regie is released under the [MIT licence](LICENSE). By contributing you agree that your contribution is licensed under the same terms.

@@ -1,15 +1,15 @@
 //! Main-thread OS wiring; session and tab policy live in Workspace.
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager};
-use rake::app_paths::AppPaths;
-use rake::app_ui::{self, AppCommand, AppUi};
-use rake::clipboard;
-use rake::config;
-use rake::dropdown::DropDown;
-use rake::hotkey::{should_toggle, Visibility};
-use rake::session_output::SessionOutput;
-use rake::terminal_protocol::{parse_workspace_request, UiDelivery};
-use rake::workspace::{Workspace, WorkspaceCommand, WorkspaceEffect};
-use rake::{build_icon, instance, terminal_profile, APP_NAME};
+use regie::app_paths::AppPaths;
+use regie::app_ui::{self, AppCommand, AppUi};
+use regie::clipboard;
+use regie::config;
+use regie::dropdown::DropDown;
+use regie::hotkey::{should_toggle, Visibility};
+use regie::session_output::SessionOutput;
+use regie::terminal_protocol::{parse_workspace_request, UiDelivery};
+use regie::workspace::{Workspace, WorkspaceCommand, WorkspaceEffect};
+use regie::{build_icon, instance, terminal_profile, APP_NAME};
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::{
