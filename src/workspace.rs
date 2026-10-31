@@ -608,6 +608,13 @@ mod tests {
                 },
             ],
         };
+        std::fs::create_dir_all(h.w.paths.legacy_config.parent().unwrap()).unwrap();
+        let old_config = b"startup_tabs='restore'";
+        std::fs::write(&h.w.paths.legacy_config, old_config).unwrap();
+        h.w.config = crate::config::load_compatible(&h.w.paths).unwrap().config;
+        let resolved = crate::theme::resolve(h.w.config.terminal_theme, None, Default::default());
+        assert_eq!(resolved.theme.background.hex(), "#121615");
+        assert!(resolved.notices.is_empty());
         tab_layout::save_atomic(&h.w.paths.legacy_layout, &old).unwrap();
         let before = std::fs::read(&h.w.paths.legacy_layout).unwrap();
         h.w.handle(WorkspaceCommand::Start);
@@ -620,6 +627,7 @@ mod tests {
         assert_eq!(new.selected, 1);
         assert_eq!(new.tabs, old.tabs);
         assert_eq!(std::fs::read(&h.w.paths.legacy_layout).unwrap(), before);
+        assert_eq!(std::fs::read(&h.w.paths.legacy_config).unwrap(), old_config);
     }
 
     #[test]
