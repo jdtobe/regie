@@ -1,7 +1,7 @@
 # Regie: identity, rename and candidate terminal theme
 
 Date: 2026-10-30
-Status: Draft for approval; visual direction approved, implementation details proposed below.
+Status: Approved by user on 2026-10-30, including the proposed setting and migration/compatibility decisions below. Terminal palette remains a candidate pending real-workload validation.
 
 ## Intent
 
@@ -275,7 +275,7 @@ the mockups.
   real-workload validation before treating it as final.
 - [x] User acceptance tools recorded above.
 - [x] Fresh builder check found nothing important left before planning.
-- [ ] User approves this complete design, including the proposed setting and
+- [x] User approves this complete design, including the proposed setting and
   migration/compatibility decisions.
-- [ ] Write the implementation plan after design approval; no product code has
+- [x] Write the implementation plan after design approval; no product code has
   been changed for this milestone yet.
