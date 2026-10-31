@@ -83,6 +83,23 @@ impl Workspace {
     pub fn active(&self) -> Option<TabId> {
         self.tabs.active()
     }
+    pub fn apply_config(&mut self, config: &Config) -> Vec<WorkspaceEffect> {
+        self.effects.clear();
+        let mut deliveries = Vec::new();
+        if self.config.appearance != config.appearance {
+            deliveries.push(UiDelivery::Appearance {
+                appearance: config.appearance,
+            });
+        }
+        if self.config.tab_position != config.tab_position {
+            deliveries.push(UiDelivery::TabPosition {
+                position: config.tab_position,
+            });
+        }
+        self.config = config.clone();
+        self.ui(deliveries);
+        std::mem::take(&mut self.effects)
+    }
     pub fn finish_delivery(&mut self, success: bool) {
         let batch = std::mem::take(&mut self.output_batch);
         if !success && !batch.is_empty() {
@@ -572,6 +589,55 @@ mod tests {
             }
             panic!("missing marker {marker}: {text}");
         }
+    }
+    #[test]
+    fn runtime_config_changes_last_tab_action_for_the_next_close() {
+        let mut h = Harness::new(Config::default(), true);
+        let updated = Config {
+            last_tab_action: LastTabAction::Hide,
+            ..Config::default()
+        };
+        h.w.apply_config(&updated);
+        let id = h.active();
+        let effects =
+            h.w.handle(WorkspaceCommand::Ui(WorkspaceRequest::CloseTab { id }));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect, WorkspaceEffect::HidePanel)));
+        assert!(!effects
+            .iter()
+            .any(|effect| matches!(effect, WorkspaceEffect::Exit)));
+    }
+    #[test]
+    fn runtime_appearance_and_bar_position_are_delivered_without_restarting_tabs() {
+        let mut h = Harness::new(Config::default(), true);
+        let id = h.active();
+        let updated = Config {
+            appearance: crate::config::Appearance::Dark,
+            tab_position: crate::config::TabPosition::Top,
+            ..Config::default()
+        };
+        let effects = h.w.apply_config(&updated);
+        assert_eq!(h.active(), id);
+        let deliveries = effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                WorkspaceEffect::Ui(deliveries) => Some(deliveries),
+                _ => None,
+            })
+            .unwrap();
+        assert!(deliveries.iter().any(|d| matches!(
+            d,
+            UiDelivery::Appearance {
+                appearance: crate::config::Appearance::Dark
+            }
+        )));
+        assert!(deliveries.iter().any(|d| matches!(
+            d,
+            UiDelivery::TabPosition {
+                position: crate::config::TabPosition::Top
+            }
+        )));
     }
     impl Drop for Harness {
         fn drop(&mut self) {

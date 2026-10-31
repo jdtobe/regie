@@ -309,6 +309,62 @@ impl DropDown {
             .set_bounds(self.window.inner_size(), self.window.scale_factor())
     }
 
+    pub fn apply_config(&mut self, config: &Config, theme: &TerminalTheme) -> Result<(), String> {
+        let size_changed = self.width_percent != config.width_percent
+            || self.height_percent != config.height_percent;
+        self.width_percent = config.width_percent;
+        self.height_percent = config.height_percent;
+        self.animation = Duration::from_millis(config.animation_ms.into());
+        if size_changed {
+            if let Some(display) = self.display_under_cursor() {
+                let home = window_rect(
+                    display.position,
+                    display.size,
+                    display.top_inset,
+                    self.width_percent,
+                    self.height_percent,
+                );
+                self.hidden_y = display.position.1 - home.height as i32;
+                self.home = Some(home);
+                self.window
+                    .set_inner_size(PhysicalSize::new(home.width, home.height));
+                self.window
+                    .set_outer_position(PhysicalPosition::new(home.x, self.y));
+                if self.visible {
+                    if self.slide.is_some() {
+                        let target = if self.hiding { self.hidden_y } else { home.y };
+                        self.slide = Some(Slide::toward(
+                            Instant::now(),
+                            self.y,
+                            target,
+                            home.y.abs_diff(self.hidden_y),
+                            self.animation,
+                        ));
+                    } else {
+                        self.y = home.y;
+                        self.window
+                            .set_outer_position(PhysicalPosition::new(home.x, home.y));
+                    }
+                }
+            }
+        }
+        self.terminal.apply(&[
+            UiDelivery::TerminalTheme {
+                theme: theme.config_json(),
+            },
+            UiDelivery::TabPosition {
+                position: config.tab_position,
+            },
+            UiDelivery::Appearance {
+                appearance: config.appearance,
+            },
+        ])?;
+        if self.visible {
+            self.resize_terminal_view()?;
+        }
+        Ok(())
+    }
+
     pub fn apply_ui(&mut self, deliveries: &[UiDelivery]) -> Result<(), String> {
         self.terminal.apply(deliveries)
     }

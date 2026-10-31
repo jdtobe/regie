@@ -71,6 +71,22 @@
   }
   function apply(message) {
     switch (message.type) {
+      case 'tab_position': strip?.setTabPosition(message.position); break;
+      case 'appearance': strip?.setAppearance(message.appearance); break;
+      case 'terminal_theme': {
+        const theme = JSON.parse(message.theme);
+        config.theme = theme.theme;
+        if (theme.fontFamily) config.fontFamily = theme.fontFamily;
+        if (theme.fontSize) config.fontSize = theme.fontSize;
+        for (const session of sessions.values()) {
+          session.terminal.options.theme = config.theme;
+          if (config.fontFamily) session.terminal.options.fontFamily = config.fontFamily;
+          if (config.fontSize) session.terminal.options.fontSize = config.fontSize;
+          session.terminal.refresh(0, session.terminal.rows - 1);
+          if (session.id === active) fit(session);
+        }
+        break;
+      }
       case 'create_tab': create(message.id); break;
       case 'select_tab': select(message.id); break;
       case 'remove_tab': {

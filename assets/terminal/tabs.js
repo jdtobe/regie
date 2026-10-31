@@ -76,7 +76,7 @@ window.createTabStrip = (post, config) => {
     else if(event.ctrlKey && !event.metaKey && !event.altKey && event.key==='Tab') message={type:'cycle_tab',backwards:event.shiftKey};
     if(message){event.preventDefault();event.stopImmediatePropagation();if(!event.repeat)post(message);}
   },true);
-  return {update(next,selected){
+  return {setTabPosition(position){document.body.dataset.tabPosition=position;}, setAppearance(appearance){document.body.dataset.appearance=appearance;}, update(next,selected){
     tabs=next;active=selected;
     if(editor&&editor.id===selected&&tabs.some(t=>t.id===editor.id)){
       for(const item of list.children){const selected=Number(item.dataset.tabId)===active;item.classList.toggle('active',selected);item.querySelector('.tab').setAttribute('aria-selected',selected);}

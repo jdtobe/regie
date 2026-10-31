@@ -1,5 +1,5 @@
 const {test, expect} = require('@playwright/test');
-const {generated_workspace, apply} = require('./fixture');
+const {generated_workspace, workspace, apply} = require('./fixture');
 
 const palette = ['36483a','e08a83','a8c59a','d6bf86','92b4ce','b6a1cc','8cbfba','d8dfd3',
   '819082','f1aaa1','c1dbaf','e9d4a0','b2d0e8','d0bce3','acd8d1','f3f4eb'];
@@ -75,6 +75,17 @@ test('macos_fixture_does_not_inherit_regie_selection', async ({page}) => {
   expect(counts['212121']).toBeGreaterThan(1000);
   expect(counts['d0d0d0']).toBeGreaterThan(100);
   expect(counts['344a3b'] || 0).toBe(0);
+});
+
+test('theme_updates_all_existing_sessions_and_preserves_their_buffers', async ({page}) => {
+  await workspace(page);
+  await apply(page, {type:'create_tab',id:1}, {type:'create_tab',id:2}, {type:'select_tab',id:1});
+  await output(page, 'persistent output');
+  const before = await page.locator('.xterm-screen').first().screenshot();
+  await apply(page, {type:'terminal_theme',theme:JSON.stringify({theme:{background:'#123456',foreground:'#abcdef'},fontFamily:'Menlo',fontSize:15})});
+  expect(await page.locator('.xterm-screen').count()).toBe(2);
+  const after = await page.locator('.xterm-screen').first().screenshot();
+  expect(after.equals(before)).toBe(false);
 });
 
 test('regie_drag_selection_and_cursor_use_candidate_colors', async ({page}) => {

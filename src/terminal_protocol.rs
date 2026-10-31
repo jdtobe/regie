@@ -71,6 +71,15 @@ pub enum UiDelivery {
         id: TabId,
         text: String,
     },
+    Appearance {
+        appearance: crate::config::Appearance,
+    },
+    TabPosition {
+        position: crate::config::TabPosition,
+    },
+    TerminalTheme {
+        theme: String,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TerminalEvent {
