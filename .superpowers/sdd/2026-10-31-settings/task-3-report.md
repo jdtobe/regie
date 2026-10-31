@@ -61,3 +61,11 @@
 ### Remaining integration boundary
 
 The requested adapter logic and headless behavioral coverage are now implemented, but no app event-loop/controller wiring was added, as requested for later integration. Consequently a live settings edit still does not invoke `replace_hotkey`, `apply_appearance`, `Workspace::apply_config`, or `DropDown::apply_config` in the running app. The native checks above have not been performed and are explicitly deferred to Task 6.
+
+## Review follow-up: animation duration and font preservation
+
+- Fixed duration-only changes during an active visible slide: the current interpolated y is sampled, then the slide is retimed to the same endpoint with the new duration. This uses the existing proportional travel rule. A zero duration now completes the slide in the same update/tick, including hide completion. Size changes and duration changes share this retiming path.
+- Added pure tests proving duration-only retiming starts at the current position, uses the new timing, and zero duration reaches the endpoint immediately.
+- Investigated the optional-font update contract. Terminal themes represent colors independently from the selected profile font; config/theme resolution carries the existing readable profile font forward. Therefore an absent font field on a later theme update means “leave selected font unchanged,” not “reset selection.” The JS handler's truthy conditional intentionally preserves current `fontFamily`/`fontSize`; Playwright now verifies a Some→None theme transition retains the selected computed font family and size while updating colors and preserving buffer contents.
+- No integration wiring was added. Concrete AppKit/window-manager interaction checks remain deferred to Task 6 as listed above.
+- Follow-up checks: `cargo test -- --test-threads=1` passed (229 unit tests, 1 integration test); `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check`, and full WebKit `npm test` passed (27 tests).

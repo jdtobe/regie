@@ -89,6 +89,10 @@ test('theme_updates_all_existing_sessions_and_preserves_their_buffers', async ({
   expect((await pixels(page))['123456'] || 0).toBeGreaterThan(100);
   await expect(page.locator('[data-terminal-id="1"] .xterm-accessibility-tree')).toContainText('persistent output');
   expect(await page.locator('[data-terminal-id="1"] .xterm').evaluate(node=>getComputedStyle(node).fontFamily)).toContain('Menlo');
+  const selectedFontSize = await page.locator('[data-terminal-id="1"] .xterm').evaluate(node=>getComputedStyle(node).fontSize);
+  await apply(page,{type:'terminal_theme',theme:JSON.stringify({theme:{background:'#654321',foreground:'#abcdef'}})});
+  expect(await page.locator('[data-terminal-id="1"] .xterm').evaluate(node=>getComputedStyle(node).fontFamily)).toContain('Menlo');
+  expect(await page.locator('[data-terminal-id="1"] .xterm').evaluate(node=>getComputedStyle(node).fontSize)).toBe(selectedFontSize);
   await apply(page,{type:'select_tab',id:2});
   await expect(page.locator('[data-terminal-id="2"] .xterm')).toBeVisible();
 });
