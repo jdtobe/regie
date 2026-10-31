@@ -19,13 +19,44 @@ pub struct SettingsWatch {
     worker: Option<JoinHandle<()>>,
 }
 
+/// A completed configuration-change burst, or a watcher failure that needs user attention.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingsWatchEvent {
+    Changed,
+    Failed(String),
+}
+
+trait WatchAdapter: Send + 'static {
+    fn watch(&mut self, path: &Path) -> Result<(), String>;
+    fn unwatch(&mut self, path: &Path) -> Result<(), String>;
+}
+
+struct NotifyAdapter(RecommendedWatcher);
+
+impl WatchAdapter for NotifyAdapter {
+    fn watch(&mut self, path: &Path) -> Result<(), String> {
+        self.0
+            .watch(path, RecursiveMode::NonRecursive)
+            .map_err(|error| error.to_string())
+    }
+
+    fn unwatch(&mut self, path: &Path) -> Result<(), String> {
+        self.0.unwatch(path).map_err(|error| error.to_string())
+    }
+}
+
 impl SettingsWatch {
-    pub fn new(paths: AppPaths, wake: impl Fn() + Send + Sync + 'static) -> Result<Self, String> {
+    pub fn new(
+        paths: AppPaths,
+        wake: impl Fn(SettingsWatchEvent) + Send + Sync + 'static,
+    ) -> Result<Self, String> {
         let (events_tx, events_rx) = mpsc::channel();
-        let mut watcher = notify::recommended_watcher(move |event| {
-            let _ = events_tx.send(event);
-        })
-        .map_err(|error| format!("could not create settings watcher: {error}"))?;
+        let mut watcher =
+            notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+                let event = event.map(|_| ()).map_err(|error| error.to_string());
+                let _ = events_tx.send(event);
+            })
+            .map_err(|error| format!("could not create settings watcher: {error}"))?;
         let watched = directories_to_watch(&paths);
         if watched.is_empty() {
             return Err("could not find an existing ancestor for settings files".into());
@@ -41,16 +72,26 @@ impl SettingsWatch {
                 })?;
         }
 
-        let (stop_tx, stop_rx) = mpsc::channel();
-        let worker = thread::Builder::new()
-            .name("settings-watch".into())
-            .spawn(move || watch_events(watcher, paths, watched, events_rx, stop_rx, wake))
-            .map_err(|error| format!("could not start settings watcher: {error}"))?;
-        Ok(Self {
-            stop: Some(stop_tx),
-            worker: Some(worker),
-        })
+        spawn_worker(paths, NotifyAdapter(watcher), watched, events_rx, wake)
     }
+}
+
+fn spawn_worker(
+    paths: AppPaths,
+    backend: impl WatchAdapter,
+    watched: Vec<PathBuf>,
+    events_rx: Receiver<Result<(), String>>,
+    wake: impl Fn(SettingsWatchEvent) + Send + Sync + 'static,
+) -> Result<SettingsWatch, String> {
+    let (stop_tx, stop_rx) = mpsc::channel();
+    let worker = thread::Builder::new()
+        .name("settings-watch".into())
+        .spawn(move || watch_events(backend, paths, watched, events_rx, stop_rx, wake))
+        .map_err(|error| format!("could not start settings watcher: {error}"))?;
+    Ok(SettingsWatch {
+        stop: Some(stop_tx),
+        worker: Some(worker),
+    })
 }
 
 impl Drop for SettingsWatch {
@@ -84,43 +125,43 @@ fn nearest_existing_directory(file: &Path) -> Option<PathBuf> {
 }
 
 fn watch_events(
-    mut watcher: RecommendedWatcher,
+    mut backend: impl WatchAdapter,
     paths: AppPaths,
     mut watched: Vec<PathBuf>,
-    events: Receiver<notify::Result<notify::Event>>,
+    events: Receiver<Result<(), String>>,
     stop: Receiver<()>,
-    wake: impl Fn() + Send + Sync + 'static,
+    wake: impl Fn(SettingsWatchEvent) + Send + Sync + 'static,
 ) {
     loop {
         match events.recv_timeout(Duration::from_millis(50)) {
             Ok(event) => {
-                let mut failed = event.is_err();
+                let mut failure = event.err();
                 while let Ok(next) = events.try_recv() {
-                    failed |= next.is_err();
+                    collect_failure(&mut failure, next.err());
                 }
-                refresh_watches(&mut watcher, &paths, &mut watched, &mut failed);
+                collect_failure(
+                    &mut failure,
+                    refresh_watches(&mut backend, &paths, &mut watched).err(),
+                );
                 // Debounce until the event stream is quiet; a wake marks the whole burst complete.
                 loop {
                     match events.recv_timeout(COALESCE_WINDOW) {
                         Ok(_) => {
-                            let mut failed = false;
+                            let mut next_failure = None;
                             while let Ok(next) = events.try_recv() {
-                                failed |= next.is_err();
+                                collect_failure(&mut next_failure, next.err());
                             }
-                            refresh_watches(&mut watcher, &paths, &mut watched, &mut failed);
-                            if failed {
-                                eprintln!(
-                                    "settings watcher reported a filesystem notification error"
-                                );
-                            }
+                            collect_failure(
+                                &mut next_failure,
+                                refresh_watches(&mut backend, &paths, &mut watched).err(),
+                            );
+                            collect_failure(&mut failure, next_failure);
                         }
                         Err(RecvTimeoutError::Timeout) => {
-                            if failed {
-                                eprintln!(
-                                    "settings watcher reported a filesystem notification error"
-                                );
-                            }
-                            wake();
+                            wake(match failure {
+                                Some(error) => SettingsWatchEvent::Failed(error),
+                                None => SettingsWatchEvent::Changed,
+                            });
                             break;
                         }
                         Err(RecvTimeoutError::Disconnected) => return,
@@ -141,24 +182,23 @@ fn watch_events(
 }
 
 fn refresh_watches(
-    watcher: &mut RecommendedWatcher,
+    backend: &mut impl WatchAdapter,
     paths: &AppPaths,
     watched: &mut Vec<PathBuf>,
-    failed: &mut bool,
-) {
+) -> Result<(), String> {
     let desired = directories_to_watch(paths);
+    let mut errors = Vec::new();
     watched.retain(|old| {
         if desired.contains(old) {
             return true;
         }
-        match watcher.unwatch(old) {
+        match backend.unwatch(old) {
             Ok(()) => false,
             Err(error) => {
-                *failed = true;
-                eprintln!(
-                    "could not stop watching settings directory {}: {error}",
+                errors.push(format!(
+                    "could not stop watching {}: {error}",
                     old.display()
-                );
+                ));
                 true
             }
         }
@@ -167,25 +207,44 @@ fn refresh_watches(
         if watched.contains(new) {
             continue;
         }
-        match watcher.watch(new, RecursiveMode::NonRecursive) {
+        match backend.watch(new) {
             Ok(()) => watched.push(new.clone()),
             Err(error) => {
-                *failed = true;
-                eprintln!(
-                    "could not watch settings directory {}: {error}",
-                    new.display()
-                );
+                errors.push(format!("could not watch {}: {error}", new.display()));
             }
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+fn collect_failure(target: &mut Option<String>, next: Option<String>) {
+    if let Some(next) = next {
+        match target {
+            Some(previous) => {
+                previous.push_str("; ");
+                previous.push_str(&next);
+            }
+            None => *target = Some(next),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{app_paths::AppPaths, settings_watch::SettingsWatch};
+    use super::COALESCE_WINDOW;
+    use crate::{
+        app_paths::AppPaths,
+        settings_watch::{
+            directories_to_watch, spawn_worker, SettingsWatch, SettingsWatchEvent, WatchAdapter,
+        },
+    };
     use std::{
-        path::PathBuf,
-        sync::mpsc::{self, Receiver},
+        path::{Path, PathBuf},
+        sync::mpsc::{self, Receiver, Sender},
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
@@ -221,19 +280,58 @@ mod tests {
 
     static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-    fn watcher(temp: &Temp) -> (SettingsWatch, Receiver<()>) {
+    struct TestBackend {
+        updates: Sender<PathBuf>,
+        fail_watch: Option<PathBuf>,
+    }
+
+    impl WatchAdapter for TestBackend {
+        fn watch(&mut self, path: &Path) -> Result<(), String> {
+            if self.fail_watch.as_deref() == Some(path) {
+                return Err("injected watch registration failure".into());
+            }
+            let _ = self.updates.send(path.to_path_buf());
+            Ok(())
+        }
+
+        fn unwatch(&mut self, _path: &Path) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn start_test_watch(
+        paths: AppPaths,
+        mut backend: TestBackend,
+        events_rx: Receiver<Result<(), String>>,
+    ) -> (SettingsWatch, Receiver<SettingsWatchEvent>) {
+        let watched = directories_to_watch(&paths);
+        for path in &watched {
+            backend.watch(path).unwrap();
+        }
+        let (wake_tx, wake_rx) = mpsc::channel();
+        let watch = spawn_worker(paths, backend, watched, events_rx, move |event| {
+            let _ = wake_tx.send(event);
+        })
+        .unwrap();
+        (watch, wake_rx)
+    }
+
+    fn watcher(temp: &Temp) -> (SettingsWatch, Receiver<SettingsWatchEvent>) {
         let (send, receive) = mpsc::channel();
-        let watch = SettingsWatch::new(temp.paths(), move || {
-            let _ = send.send(());
+        let watch = SettingsWatch::new(temp.paths(), move |event| {
+            let _ = send.send(event);
         })
         .unwrap();
         (watch, receive)
     }
 
-    fn wake(receive: &Receiver<()>) {
-        receive
-            .recv_timeout(Duration::from_secs(3))
-            .expect("watcher did not wake before deadline");
+    fn wake(receive: &Receiver<SettingsWatchEvent>) {
+        assert!(matches!(
+            receive
+                .recv_timeout(Duration::from_secs(3))
+                .expect("watcher did not wake before deadline"),
+            SettingsWatchEvent::Changed
+        ));
     }
 
     #[test]
@@ -270,6 +368,77 @@ mod tests {
         std::fs::create_dir_all(temp.paths().config.parent().unwrap()).unwrap();
         std::fs::write(&temp.paths().config, "height_percent=60").unwrap();
         wake(&receive);
+    }
+
+    #[test]
+    fn re_registers_new_config_parent_before_later_file_change() {
+        let temp = Temp::new();
+        let (events_tx, events_rx) = mpsc::channel();
+        let (registered_tx, registered_rx) = mpsc::channel();
+        let backend = TestBackend {
+            updates: registered_tx,
+            fail_watch: None,
+        };
+        let (watch, receive) = start_test_watch(temp.paths(), backend, events_rx);
+        std::fs::create_dir_all(temp.paths().config.parent().unwrap()).unwrap();
+        events_tx.send(Ok(())).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut registered_config_parent = false;
+        while std::time::Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if registered_rx.recv_timeout(remaining).ok().as_deref() == temp.paths().config.parent()
+            {
+                registered_config_parent = true;
+                break;
+            }
+        }
+        assert!(
+            registered_config_parent,
+            "new config parent was never registered"
+        );
+        std::fs::write(&temp.paths().config, "height_percent=50").unwrap();
+        events_tx.send(Ok(())).unwrap();
+        wake(&receive);
+        drop(watch);
+    }
+
+    #[test]
+    fn async_source_failure_is_reported_without_a_healthy_change_event() {
+        let temp = Temp::new();
+        let (events_tx, events_rx) = mpsc::channel();
+        let backend = TestBackend {
+            updates: mpsc::channel().0,
+            fail_watch: None,
+        };
+        let (_watch, receive) = start_test_watch(temp.paths(), backend, events_rx);
+        events_tx
+            .send(Err("injected notification failure".into()))
+            .unwrap();
+        assert!(matches!(
+            receive.recv_timeout(Duration::from_secs(3)).unwrap(),
+            SettingsWatchEvent::Failed(message) if message.contains("injected notification failure")
+        ));
+        assert!(receive.recv_timeout(COALESCE_WINDOW * 2).is_err());
+    }
+
+    #[test]
+    fn async_registration_failure_is_reported_not_as_a_healthy_change() {
+        let temp = Temp::new();
+        let config_parent = temp.paths().config.parent().unwrap().to_path_buf();
+        let (events_tx, events_rx) = mpsc::channel();
+        let backend = TestBackend {
+            updates: mpsc::channel().0,
+            fail_watch: Some(config_parent.clone()),
+        };
+        let (_watch, receive) = start_test_watch(temp.paths(), backend, events_rx);
+        std::fs::create_dir_all(&config_parent).unwrap();
+        events_tx.send(Ok(())).unwrap();
+        assert!(matches!(
+            receive.recv_timeout(Duration::from_secs(3)).unwrap(),
+            SettingsWatchEvent::Failed(message)
+                if message.contains("injected watch registration failure")
+        ));
+        assert!(receive.recv_timeout(COALESCE_WINDOW * 2).is_err());
     }
 
     #[test]
