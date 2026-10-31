@@ -44,12 +44,41 @@ pub fn load(path: &Path) -> Result<Option<SavedLayout>, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(format!("could not read {}: {e}", path.display())),
     };
+    decode(&data, path).map(Some)
+}
+
+fn decode(data: &[u8], path: &Path) -> Result<SavedLayout, String> {
     let saved: SavedLayout =
-        serde_json::from_slice(&data).map_err(|e| format!("invalid {}: {e}", path.display()))?;
+        serde_json::from_slice(data).map_err(|e| format!("invalid {}: {e}", path.display()))?;
     if saved.version != 1 {
         return Err(format!("unsupported tab layout version {}", saved.version));
     }
-    Ok(Some(saved))
+    Ok(saved)
+}
+
+pub struct LoadedLayout {
+    pub saved: Option<SavedLayout>,
+    pub notices: Vec<String>,
+}
+
+pub fn load_compatible(paths: &crate::app_paths::AppPaths) -> Result<LoadedLayout, String> {
+    let Some(file) = crate::app_paths::read_preferred(&paths.layout, &paths.legacy_layout)? else {
+        return Ok(LoadedLayout {
+            saved: None,
+            notices: vec![],
+        });
+    };
+    let saved = Some(decode(&file.bytes, &file.path)?);
+    let notices = if file.legacy {
+        vec![format!(
+            "Restoring legacy layout {}; future saves use {}",
+            file.path.display(),
+            paths.layout.display()
+        )]
+    } else {
+        vec![]
+    };
+    Ok(LoadedLayout { saved, notices })
 }
 
 pub fn save_atomic(path: &Path, layout: &SavedLayout) -> Result<(), String> {
@@ -146,6 +175,33 @@ pub fn resolve_startup(
 mod tests {
     use super::*;
     use std::os::unix::ffi::OsStringExt;
+
+    #[test]
+    fn compatible_layout_does_not_roll_back_a_bad_canonical_file() {
+        let home = temp();
+        let paths = crate::app_paths::AppPaths::new(&home);
+        let saved = SavedLayout {
+            version: 1,
+            selected: 0,
+            tabs: vec![SavedTab {
+                cwd: home.clone(),
+                name: TabName {
+                    manual: Some("legacy".into()),
+                    automatic: None,
+                },
+            }],
+        };
+        save_atomic(&paths.legacy_layout, &saved).unwrap();
+        let old = std::fs::read(&paths.legacy_layout).unwrap();
+        let loaded = load_compatible(&paths).unwrap();
+        assert_eq!(loaded.saved, Some(saved));
+        assert!(loaded.notices.join(" ").contains("Rake"));
+        std::fs::create_dir_all(paths.layout.parent().unwrap()).unwrap();
+        std::fs::write(&paths.layout, "broken").unwrap();
+        assert!(load_compatible(&paths).is_err());
+        assert_eq!(std::fs::read(&paths.legacy_layout).unwrap(), old);
+        std::fs::remove_dir_all(home).unwrap();
+    }
 
     #[test]
     fn snapshot_preserves_manual_and_automatic_names() {

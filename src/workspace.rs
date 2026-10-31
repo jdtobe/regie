@@ -1,4 +1,5 @@
 //! Application policy. Window/menu/clipboard operations are effects executed on the UI thread.
+use crate::app_paths::AppPaths;
 use crate::app_ui::AppCommand;
 use crate::close_policy::{CloseDecision, CloseIntent, ClosePolicy};
 use crate::config::{Config, LastTabAction, NewTabDirectory};
@@ -34,7 +35,7 @@ pub enum WorkspaceEffect {
 pub struct Workspace {
     config: Config,
     home: PathBuf,
-    state_dir: PathBuf,
+    paths: AppPaths,
     shell: ShellSpec,
     tabs: Tabs,
     sessions: Sessions,
@@ -52,11 +53,11 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    pub fn new(config: Config, home: PathBuf, state_dir: PathBuf, output: SessionOutput) -> Self {
+    pub fn new(config: Config, home: PathBuf, paths: AppPaths, output: SessionOutput) -> Self {
         Self {
             config,
             home,
-            state_dir,
+            paths,
             shell: default_login_shell(std::env::var_os("SHELL")),
             tabs: Tabs::new(),
             sessions: Sessions::new(output.clone()),
@@ -141,7 +142,7 @@ impl Workspace {
             vec![]
         };
         let saved = tab_layout::snapshot(&self.tabs, &observations);
-        if let Err(error) = tab_layout::save_atomic(&self.state_dir.join("tabs.json"), &saved) {
+        if let Err(error) = tab_layout::save_atomic(&self.paths.layout, &saved) {
             self.notice(error);
         }
     }
@@ -359,8 +360,13 @@ impl Workspace {
         match command {
             WorkspaceCommand::Start if !self.started => {
                 self.started = true;
-                let saved = match tab_layout::load(&self.state_dir.join("tabs.json")) {
-                    Ok(saved) => saved,
+                let saved = match tab_layout::load_compatible(&self.paths) {
+                    Ok(loaded) => {
+                        for notice in loaded.notices {
+                            self.notice(notice);
+                        }
+                        loaded.saved
+                    }
                     Err(error) => {
                         self.notice(error);
                         None
@@ -530,12 +536,9 @@ mod tests {
                 NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
             std::fs::create_dir_all(&dir).unwrap();
-            let mut w = Workspace::new(
-                config,
-                PathBuf::from("/"),
-                dir.clone(),
-                SessionOutput::new(),
-            );
+            let mut paths = AppPaths::new(&dir);
+            paths.layout = dir.join("tabs.json");
+            let mut w = Workspace::new(config, PathBuf::from("/"), paths, SessionOutput::new());
             w.shell = ShellSpec {
                 program: "/bin/sh".into(),
                 args: vec!["-i".into()],
@@ -574,6 +577,79 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.dir);
         }
+    }
+
+    #[test]
+    fn legacy_restore_saves_canonical_without_mutating_old_layout() {
+        let mut h = Harness::new(
+            Config {
+                startup_tabs: StartupTabs::Restore,
+                ..Default::default()
+            },
+            false,
+        );
+        let old = SavedLayout {
+            version: 1,
+            selected: 1,
+            tabs: vec![
+                SavedTab {
+                    cwd: "/".into(),
+                    name: TabName {
+                        manual: Some("first".into()),
+                        automatic: Some("shell".into()),
+                    },
+                },
+                SavedTab {
+                    cwd: h.dir.clone(),
+                    name: TabName {
+                        manual: Some("second".into()),
+                        automatic: Some("work".into()),
+                    },
+                },
+            ],
+        };
+        tab_layout::save_atomic(&h.w.paths.legacy_layout, &old).unwrap();
+        let before = std::fs::read(&h.w.paths.legacy_layout).unwrap();
+        h.w.handle(WorkspaceCommand::Start);
+        assert_eq!(h.w.tabs.ordered().len(), 2);
+        assert_eq!(
+            h.w.tabs.get(h.active()).unwrap().name.manual.as_deref(),
+            Some("second")
+        );
+        let new = tab_layout::load(&h.w.paths.layout).unwrap().unwrap();
+        assert_eq!(new.selected, 1);
+        assert_eq!(new.tabs, old.tabs);
+        assert_eq!(std::fs::read(&h.w.paths.legacy_layout).unwrap(), before);
+    }
+
+    #[test]
+    fn corrupt_canonical_layout_does_not_restore_legacy() {
+        let mut h = Harness::new(
+            Config {
+                startup_tabs: StartupTabs::Restore,
+                ..Default::default()
+            },
+            false,
+        );
+        tab_layout::save_atomic(
+            &h.w.paths.legacy_layout,
+            &SavedLayout {
+                version: 1,
+                selected: 0,
+                tabs: vec![SavedTab {
+                    cwd: "/".into(),
+                    name: TabName {
+                        manual: Some("do not restore".into()),
+                        automatic: None,
+                    },
+                }],
+            },
+        )
+        .unwrap();
+        std::fs::write(&h.w.paths.layout, "broken").unwrap();
+        h.w.handle(WorkspaceCommand::Start);
+        assert_eq!(h.w.tabs.get(h.active()).unwrap().name.manual, None);
+        assert!(h.w.notices.iter().any(|n| n.contains("invalid")));
     }
     #[test]
     fn new_tab_uses_current_local_cwd() {
