@@ -160,7 +160,20 @@ mod tests {
             request_show(second).unwrap();
             rx.recv_timeout(Duration::from_secs(2)).unwrap();
             drop(owner);
-            assert!(claim(second).unwrap().is_some());
+            // Concurrent PTY tests fork: their pre-exec children briefly inherit this
+            // CLOEXEC lock descriptor. Require release within a bound, not within
+            // the scheduling gap between drop and another thread's exec.
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                if claim(second).unwrap().is_some() {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "lock not released after owner drop"
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
             std::fs::remove_dir_all(home).unwrap();
         }
     }
