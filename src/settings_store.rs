@@ -142,20 +142,27 @@ impl SettingsStore {
         expected: &ConfigSnapshot,
         changes: &[(SettingKey, SettingValue)],
     ) -> Result<ConfigSnapshot, StoreError> {
+        if let ConfigStatus::Unreadable(error) = &expected.status {
+            return Err(StoreError::Inaccessible(error.clone()));
+        }
+        if let ConfigStatus::Malformed(error) = &expected.status {
+            return Err(StoreError::Malformed(error.clone()));
+        }
+        let current = Self::read(paths);
+        if let ConfigStatus::Unreadable(error) = &current.status {
+            return Err(StoreError::Inaccessible(error.clone()));
+        }
+        if current.path != expected.path {
+            return Err(StoreError::Conflict(
+                changes
+                    .first()
+                    .map(|change| change.0)
+                    .unwrap_or(SettingKey::Hotkey),
+            ));
+        }
         let path = &paths.config;
-        let (actual, canonical_missing) = match fs::read(path) {
-            Ok(b) => (
-                String::from_utf8(b).map_err(|e| StoreError::Malformed(e.to_string()))?,
-                false,
-            ),
-            Err(e)
-                if e.kind() == std::io::ErrorKind::NotFound
-                    && matches!(fs::symlink_metadata(path), Err(ref m) if m.kind() == std::io::ErrorKind::NotFound) =>
-            {
-                (expected.text.clone(), true)
-            }
-            Err(e) => return Err(StoreError::Inaccessible(format!("{}: {e}", path.display()))),
-        };
+        let actual = current.text;
+        let canonical_missing = !path.exists();
         let mut doc = actual
             .parse::<toml_edit::DocumentMut>()
             .map_err(|e| StoreError::Malformed(e.to_string()))?;
@@ -190,16 +197,13 @@ impl SettingsStore {
             suffix += 1;
             temp = path.with_extension(format!("toml.{}-{suffix}.tmp", std::process::id()));
         }
+        let mut temp_created = false;
         let result = (|| -> Result<(), std::io::Error> {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temp)?;
-            file.write_all(updated.as_bytes())?;
-            file.sync_all()?;
+            write_temp_file(&temp, updated.as_bytes())?;
+            temp_created = true;
             let unchanged = if canonical_missing {
                 matches!(fs::symlink_metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
             } else {
@@ -220,7 +224,9 @@ impl SettingsStore {
             Ok(())
         })();
         if let Err(e) = result {
-            let _ = fs::remove_file(&temp);
+            if temp_created {
+                let _ = fs::remove_file(&temp);
+            }
             return Err(if e.kind() == std::io::ErrorKind::WouldBlock {
                 StoreError::Conflict(changes.first().map(|c| c.0).unwrap_or(SettingKey::Hotkey))
             } else {
@@ -245,8 +251,30 @@ fn unreadable(path: PathBuf, error: String) -> ConfigSnapshot {
         status: ConfigStatus::Unreadable(error),
     }
 }
+fn write_temp_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(error);
+    }
+    Ok(())
+}
 fn fields(text: &str) -> Vec<FieldState> {
     let parsed = toml::from_str::<toml::Value>(text);
+    if let Err(error) = &parsed {
+        return SettingKey::ALL
+            .iter()
+            .map(|key| FieldState {
+                key: *key,
+                value: None,
+                error: Some(error.to_string()),
+            })
+            .collect();
+    }
     SettingKey::ALL
         .iter()
         .map(|key| {
@@ -409,6 +437,80 @@ mod tests {
             SettingsStore::read(&p).status,
             ConfigStatus::Unreadable(_)
         ));
+    }
+    #[test]
+    fn malformed_toml_does_not_report_defaults_as_recovered_fields() {
+        let states = fields("height_percent = \n");
+        assert!(states
+            .iter()
+            .all(|field| field.value.is_none() && field.error.is_some()));
+    }
+    #[test]
+    fn failed_create_new_does_not_remove_another_owners_temp_file() {
+        let p = temp();
+        std::fs::create_dir_all(p.config.parent().unwrap()).unwrap();
+        let temp_path = p.config.with_extension("toml.occupied.tmp");
+        std::fs::write(&temp_path, "owned by another process").unwrap();
+        assert!(write_temp_file(&temp_path, b"ours").is_err());
+        assert_eq!(
+            std::fs::read(&temp_path).unwrap(),
+            b"owned by another process"
+        );
+    }
+    #[test]
+    fn deleting_expected_canonical_config_does_not_resurrect_stale_text() {
+        let p = temp();
+        std::fs::create_dir_all(p.config.parent().unwrap()).unwrap();
+        std::fs::write(&p.config, "height_percent=65\n").unwrap();
+        let expected = SettingsStore::read(&p);
+        std::fs::remove_file(&p.config).unwrap();
+        assert!(matches!(
+            SettingsStore::write(
+                &p,
+                &expected,
+                &[(SettingKey::HeightPercent, SettingValue::U8(70))]
+            ),
+            Err(StoreError::Conflict(_))
+        ));
+        assert!(!p.config.exists());
+    }
+    #[test]
+    fn changed_legacy_source_conflicts_on_edited_field_and_preserves_legacy() {
+        let p = temp();
+        std::fs::create_dir_all(p.legacy_config.parent().unwrap()).unwrap();
+        std::fs::write(&p.legacy_config, "height_percent=40\n").unwrap();
+        let expected = SettingsStore::read(&p);
+        std::fs::write(&p.legacy_config, "height_percent=55\n").unwrap();
+        assert!(matches!(
+            SettingsStore::write(
+                &p,
+                &expected,
+                &[(SettingKey::HeightPercent, SettingValue::U8(70))]
+            ),
+            Err(StoreError::Conflict(_))
+        ));
+        assert!(!p.config.exists());
+        assert_eq!(
+            std::fs::read_to_string(&p.legacy_config).unwrap(),
+            "height_percent=55\n"
+        );
+    }
+    #[test]
+    fn unreadable_snapshot_cannot_be_used_to_overwrite_canonical_config() {
+        let p = temp();
+        std::fs::create_dir_all(p.config.parent().unwrap()).unwrap();
+        std::fs::write(&p.config, [255]).unwrap();
+        let expected = SettingsStore::read(&p);
+        assert!(matches!(expected.status, ConfigStatus::Unreadable(_)));
+        assert!(matches!(
+            SettingsStore::write(
+                &p,
+                &expected,
+                &[(SettingKey::HeightPercent, SettingValue::U8(70))]
+            ),
+            Err(StoreError::Inaccessible(_))
+        ));
+        assert_eq!(std::fs::read(&p.config).unwrap(), [255]);
     }
     #[test]
     fn detects_unknown_keys_and_field_types_but_uses_full_config_validation() {
