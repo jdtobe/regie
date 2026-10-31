@@ -1,8 +1,13 @@
-# Rake roadmap
+# Regie roadmap
+
+The Regie identity, Descending Cue icons, Reveal controls and candidate Regie Dark
+default are implemented. [Native/workload acceptance](testing/regie.md) is pending;
+the palette is not frozen. A website, light terminal theme and Settings UI remain
+future work, not part of this preview.
 
 ## Goal
 
-Rake is a fast, native, always-available terminal that drops down from the top of the screen on a global hotkey, in the spirit of the console in Quake. macOS first, cross-platform if practical.
+Regie is a fast, native, always-available terminal that drops down from the top of the screen on a global hotkey, in the spirit of the console in Quake. macOS first, cross-platform if practical.
 
 ## Expected feature set
 
@@ -37,7 +42,7 @@ Each milestone is a small, shippable slice built test-first (see [principles](pr
 6. **Tabs (implemented; native hand checks pending):** independent shell sessions, configurable bottom/top tabs, cwd inheritance, manual/automatic names, close/quit confirmation, optional fresh-shell layout restoration and independent System/Light/Dark controls. Tabs take priority over the general Settings UI. Drag reordering is wanted follow-up work.
 7. **Config UI:** user-editable settings with sensible defaults already live in TOML; the in-app Settings menu follows tabs.
 8. **Polish (partly done):** the panel opens on the display under the mouse, is present on every Space, and joins full-screen apps. Remaining: focus behavior and the start-of-slide hitch.
-9. **Release (partly done):** `scripts/package.sh` builds `Rake.app` and a DMG, and the release workflow publishes it. Signing and notarisation wait for an Apple Developer account.
+9. **Release (partly done):** `scripts/package.sh` builds `Regie.app` and a DMG, and the release workflow publishes it. Signing and notarisation wait for an Apple Developer account.
 10. **Cross-platform:** Linux and Windows.
 
 Milestones 1 to 5 formed the first usable single-session terminal. Tabs are the current priority, followed by their native acceptance checks, then the broader Settings UI and polish. Profiles remain separate future work.

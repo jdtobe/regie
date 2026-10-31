@@ -1,4 +1,4 @@
-# Rake design
+# Regie design
 
 ## Current architecture
 
@@ -7,6 +7,7 @@ src/main.rs     Event loop and wiring (thin, not unit tested)
 src/lib.rs      Pure, testable helpers (icon pixels, About metadata)
 src/hotkey.rs   Hotkey parsing and the show/hide toggle state
 src/config.rs   TOML config loading and validation
+src/app_paths.rs Canonical Regie data, read-only Rake fallback, shared runtime namespace
 src/geometry.rs Where the drop-down window goes (pure, tested)
 src/animation.rs Easing and slide maths (pure, tested)
 src/terminal_protocol.rs Binary-safe webview messages and output buffering (pure, tested)
@@ -45,7 +46,19 @@ Platform-specific code stays behind `cfg` gates and small functions so a second 
 
 **Clipboard.** The terminal page is loaded from an in-memory HTML string, so it has an opaque origin and is not a secure context; `navigator.clipboard` does not exist there. Copy and paste therefore travel over IPC: the page sends the selected text (or a paste request), and `src/clipboard.rs` reads and writes the native pasteboard. Paste is delivered back to the page so xterm.js applies bracketed-paste and key handling before the text reaches the shell.
 
-**Theme.** Rake reads the macOS Terminal default profile at startup and gives xterm.js its background, text and cursor colours, all 16 ANSI colours, and font family and size ([ADR 9](adr/0009-adopt-the-terminal-profile.md)). Values are injected into the bundled page as JSON; there is no theme IPC. If the profile cannot be read, Rake keeps its own dark look. Opacity, blur, background images and selection colour are not adopted, and profile changes apply on the next launch.
+**Theme.** Candidate Regie Dark is the default, with `terminal_theme="macos"` for
+macOS Terminal colors. The readable profile font is selected independently in
+both modes; missing color profiles in macOS mode use Regie Dark with a notice.
+Rust injects named xterm ANSI/cursor/selection fields into the bundled document,
+not an unsupported `ansi` array. UI appearance only selects Reveal control tokens.
+Settings apply on restart; no theme IPC or remote fonts. [ADR 17](adr/0017-regie-identity-and-theme.md)
+supersedes [ADR 9](adr/0009-adopt-the-terminal-profile.md) only for default colors.
+
+**Compatibility.** `AppPaths` separates Regie config/layout from the deliberately
+shared Rake lock/socket directory. Only genuine canonical absence allows a
+read-only legacy fallback; a present corrupt/unreadable file cannot roll back.
+Restoration preserves names/order/selection/cwd with fresh shells; successful
+saves use canonical Regie layout and never overwrite the old Rake layout.
 
 ## Complications we expect
 

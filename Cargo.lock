@@ -1786,26 +1786,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rake"
-version = "0.1.0"
-dependencies = [
- "base64",
- "global-hotkey",
- "libc",
- "objc2",
- "objc2-app-kit",
- "objc2-foundation",
- "png",
- "portable-pty",
- "serde",
- "serde_json",
- "tao",
- "toml 1.1.8+spec-1.1.0",
- "tray-icon",
- "wry",
-]
-
-[[package]]
 name = "raw-window-handle"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1828,6 +1808,26 @@ checksum = "60dc65c0ff1a7ae1294b0c67b9f14baf70b644404010370171787bfac1038fc0"
 dependencies = [
  "libredox",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "regie"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "global-hotkey",
+ "libc",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "png",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "tao",
+ "toml 1.1.8+spec-1.1.0",
+ "tray-icon",
+ "wry",
 ]
 
 [[package]]

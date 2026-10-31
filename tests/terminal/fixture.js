@@ -10,11 +10,16 @@ async function workspace(page, overrides = {}) {
     XTERM_JS: read('xterm.js'), ADDON_FIT_JS: read('addon-fit.js'), ADDON_WEBGL_JS: read('addon-webgl.js'),
     TABS_CSS: fs.existsSync(path.join(root,'assets/terminal/tabs.css')) ? read('tabs.css') : '',
     TABS_JS: fs.existsSync(path.join(root,'assets/terminal/tabs.js')) ? read('tabs.js') : '',
-    RAKE_JS: read('rake.js').replace('/*__RAKE_CONFIG__*/', JSON.stringify(config))
+    REGIE_JS: read('regie.js').replace('/*__REGIE_CONFIG__*/', JSON.stringify(config))
   })) html = html.replace(`/*__${token}__*/`, content);
   await page.addInitScript(() => {window.messages=[]; window.ipc={postMessage: body => window.messages.push(JSON.parse(body))};});
   await page.goto('about:blank');
   await page.setContent(html);
 }
-async function apply(page, ...messages) { await page.evaluate(messages => messages.forEach(message => window.rake.apply(message)), messages); }
-module.exports = {workspace, apply};
+async function apply(page, ...messages) { await page.evaluate(messages => messages.forEach(message => window.regie.apply(message)), messages); }
+async function generated_workspace(page, source = 'regie', appearance = 'system') {
+  await page.addInitScript(() => {window.messages=[]; window.ipc={postMessage: body => window.messages.push(JSON.parse(body))};});
+  await page.goto('about:blank');
+  await page.setContent(fs.readFileSync(path.join(root, 'target/terminal-fixtures', `${source}-${appearance}.html`), 'utf8'));
+}
+module.exports = {workspace, generated_workspace, apply};

@@ -1,6 +1,7 @@
 //! Pure helpers for the menubar app, kept separate from the event loop so they can be unit tested.
 
 pub mod animation;
+pub mod app_paths;
 pub mod app_ui;
 pub mod clipboard;
 pub mod close_policy;
@@ -28,61 +29,16 @@ use tray_icon::Icon;
 /// Pixel size of the menubar icon. The drawing grid is 22 units; drawing at twice that
 /// gives Retina real pixels, and the tray scales the image down to 22 points.
 pub const ICON_SIZE: u32 = 44;
+#[cfg(test)]
 const ICON_SCALE: f32 = 2.0;
-pub const APP_NAME: &str = "Rake";
+pub const APP_NAME: &str = "Regie";
 
-/// RGBA pixels for the menubar icon: a filled bar above an outlined pane, black with alpha
+/// RGBA pixels for the menubar Descending Cue, black with alpha
 /// so macOS can use it as a template image and tint it for light and dark menubars.
 pub fn build_icon_rgba() -> Vec<u8> {
-    let mut rgba = Vec::with_capacity((ICON_SIZE * ICON_SIZE * 4) as usize);
-    for y in 0..ICON_SIZE {
-        for x in 0..ICON_SIZE {
-            rgba.extend_from_slice(&[0, 0, 0, coverage(x, y)]);
-        }
-    }
+    let (rgba, width, height) = decode_icon(include_bytes!("../assets/icons/menubar-44.png"));
+    assert_eq!((width, height), (ICON_SIZE, ICON_SIZE));
     rgba
-}
-
-/// Antialiased coverage of the mark at one pixel, sampled 4x4 per pixel.
-fn coverage(x: u32, y: u32) -> u8 {
-    const SAMPLES: u32 = 4;
-    let mut hits = 0;
-    for sample_y in 0..SAMPLES {
-        for sample_x in 0..SAMPLES {
-            let px = (x as f32 + (sample_x as f32 + 0.5) / SAMPLES as f32) / ICON_SCALE;
-            let py = (y as f32 + (sample_y as f32 + 0.5) / SAMPLES as f32) / ICON_SCALE;
-            if inside_bar(px, py) || inside_pane(px, py) {
-                hits += 1;
-            }
-        }
-    }
-    ((255 * hits + SAMPLES * SAMPLES / 2) / (SAMPLES * SAMPLES)) as u8
-}
-
-/// Signed distance to a rounded rectangle, negative inside.
-fn rounded_rect_distance(
-    px: f32,
-    py: f32,
-    centre_x: f32,
-    centre_y: f32,
-    half_width: f32,
-    half_height: f32,
-    radius: f32,
-) -> f32 {
-    let qx = (px - centre_x).abs() - (half_width - radius);
-    let qy = (py - centre_y).abs() - (half_height - radius);
-    let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt();
-    outside + qx.max(qy).min(0.0) - radius
-}
-
-/// The menu bar edge: x 3.5..18.5, y 4.5..6.9 on the 22-unit grid.
-fn inside_bar(px: f32, py: f32) -> bool {
-    rounded_rect_distance(px, py, 11.0, 5.7, 7.5, 1.2, 1.2) <= 0.0
-}
-
-/// The pane outline: x 5.5..16.5, y 9..18, stroke 1.6 centred on the edge.
-fn inside_pane(px: f32, py: f32) -> bool {
-    rounded_rect_distance(px, py, 11.0, 13.5, 5.5, 4.5, 1.8).abs() <= 0.8
 }
 
 pub fn build_icon() -> Icon {
@@ -94,7 +50,11 @@ const APP_ICON_PNG: &[u8] = include_bytes!("../assets/icons/app-1024.png");
 
 /// Decode the app icon to RGBA pixels: `(pixels, width, height)`.
 fn app_icon_rgba() -> (Vec<u8>, u32, u32) {
-    let mut reader = png::Decoder::new(std::io::Cursor::new(APP_ICON_PNG))
+    decode_icon(APP_ICON_PNG)
+}
+
+fn decode_icon(bytes: &[u8]) -> (Vec<u8>, u32, u32) {
+    let mut reader = png::Decoder::new(std::io::Cursor::new(bytes))
         .read_info()
         .expect("the app icon is a valid PNG");
     let mut buffer = vec![
@@ -164,22 +124,30 @@ mod tests {
     }
 
     #[test]
-    fn icon_draws_the_bar_at_the_top() {
+    fn icon_draws_continuous_brackets_and_centered_descending_cue() {
         let data = build_icon_rgba();
-        assert_eq!(alpha_at_grid_point(&data, 11.0, 5.7), 255);
+        for (x, y) in [(4.0, 6.0), (18.0, 6.0), (11.0, 10.25), (11.0, 14.25)] {
+            assert!(alpha_at_grid_point(&data, x, y) >= 240, "{x},{y}");
+        }
     }
 
     #[test]
-    fn icon_leaves_the_gap_between_bar_and_pane_empty() {
+    fn icon_leaves_cue_gap_and_top_center_empty() {
         let data = build_icon_rgba();
-        assert_eq!(alpha_at_grid_point(&data, 11.0, 7.5), 0);
+        for (x, y) in [(11.0, 12.0), (11.0, 5.0), (0.0, 0.0), (21.0, 21.0)] {
+            assert_eq!(alpha_at_grid_point(&data, x, y), 0, "{x},{y}");
+        }
     }
 
     #[test]
-    fn icon_outlines_the_pane() {
-        let data = build_icon_rgba();
-        assert_eq!(alpha_at_grid_point(&data, 11.0, 9.0), 255);
-        assert_eq!(alpha_at_grid_point(&data, 11.0, 13.5), 0);
+    fn app_icon_has_forest_cue_and_transparent_corners() {
+        let (data, width, _) = app_icon_rgba();
+        let pixel = |x: u32, y: u32| {
+            &data[((y * width + x) * 4) as usize..((y * width + x) * 4 + 4) as usize]
+        };
+        assert_eq!(pixel(64 * 8, 60 * 8), &[43, 76, 59, 255]);
+        assert_eq!(pixel(0, 0)[3], 0);
+        assert_eq!(pixel(1023, 1023)[3], 0);
     }
 
     #[test]
@@ -211,9 +179,9 @@ mod tests {
     }
 
     #[test]
-    fn about_metadata_uses_rake_brand() {
+    fn about_metadata_uses_regie_brand() {
         let meta = about_metadata();
-        assert_eq!(meta.name.as_deref(), Some("Rake"));
+        assert_eq!(meta.name.as_deref(), Some("Regie"));
         assert_eq!(
             meta.version,
             Some(format!("v{}", env!("CARGO_PKG_VERSION")))

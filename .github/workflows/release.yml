@@ -98,9 +98,9 @@ jobs:
           TAG: ${{ needs.build.outputs.tag }}
           SHA256: ${{ needs.build.outputs.sha256 }}
         run: |
-          dmg="release/Rake-${TAG}-arm64.dmg"
+          dmg="release/Regie-${TAG}-arm64.dmg"
           printf '%s  %s\n' "$SHA256" "$dmg" | sha256sum --check -
           # Fail on an existing ref rather than publishing against an unchecked tag.
           gh api "repos/${GH_REPO}/git/refs" -f "ref=refs/tags/${TAG}" -f "sha=${GITHUB_SHA}"
           gh release create "$TAG" "$dmg" --verify-tag --title "$TAG" --generate-notes \
-            --notes "SHA-256 (Rake-${TAG}-arm64.dmg): ${SHA256}" --target "$GITHUB_SHA"
+            --notes "SHA-256 (Regie-${TAG}-arm64.dmg): ${SHA256}" --target "$GITHUB_SHA"

@@ -1,7 +1,37 @@
 const {test,expect}=require('@playwright/test');
-const {workspace,apply}=require('./fixture');
+const {workspace,generated_workspace,apply}=require('./fixture');
 const tab=(id,title=`tab-${id}`)=>({id,title,manual:null,busy:false});
 const metadata=(tabs,active=1)=>({type:'tab_metadata',tabs,active});
+
+function contrast(a,b) {
+  const luminance = color => color.match(/\d+/g).slice(0,3).map(Number).map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((sum,v,i)=>sum+v*[.2126,.7152,.0722][i],0);
+  const x=luminance(a),y=luminance(b); return (Math.max(x,y)+.05)/(Math.min(x,y)+.05);
+}
+test('reveal_controls_have_accessible_colors_and_keyboard_focus', async({page})=>{
+  for(const [appearance,bg,accent] of [['light','rgb(244, 240, 231)','rgb(62, 104, 72)'],['dark','rgb(28, 43, 37)','rgb(186, 213, 189)']]) {
+    await generated_workspace(page,'regie',appearance);
+    await apply(page,metadata([{...tab(1),busy:true}]));
+    const colors=await page.locator('#tabstrip').evaluate(el=>{
+      const bar=getComputedStyle(el),active=getComputedStyle(el.querySelector('.active')),indicator=getComputedStyle(el.querySelector('.active'),'::before');
+      return {bg:bar.backgroundColor,fg:bar.color,active:active.backgroundColor,accent:indicator.backgroundColor};
+    });
+    expect(colors.bg).toBe(bg);expect(colors.accent).toBe(accent);
+    expect(contrast(colors.fg,colors.bg)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(colors.fg,colors.active)).toBeGreaterThanOrEqual(4.5);
+    for(const surface of [colors.bg,colors.active]) expect(contrast(accent,surface)).toBeGreaterThanOrEqual(3);
+    await expect(page.getByRole('tab')).toHaveAttribute('aria-selected','true');
+    await expect(page.locator('.busy')).toBeVisible();
+    for(const control of [page.getByRole('tab'),page.getByRole('button',{name:'New tab'})]) {
+      await control.focus(); await control.press('ArrowLeft');
+      const outline=await control.evaluate(el=>{const s=getComputedStyle(el);return [s.outlineStyle,parseFloat(s.outlineWidth),s.outlineColor]});
+      expect(outline[0]).not.toBe('none');expect(outline[1]).toBeGreaterThan(0);expect(outline[2]).toBe(accent);
+    }
+    await page.getByText('tab-1',{exact:true}).dblclick();
+    const input=page.getByRole('textbox',{name:'Tab name'});await input.press('ArrowLeft');
+    expect(await input.evaluate(el=>getComputedStyle(el).outlineColor)).toBe(accent);
+    expect(await input.evaluate(el=>parseFloat(getComputedStyle(el).outlineWidth))).toBeGreaterThan(0);
+  }
+});
 
 test('bottom_is_default_top_is_configurable',async({page})=>{
   for(const position of ['bottom','top']) {
@@ -84,7 +114,7 @@ test('rename_survives_async_selection_round_trips',async({page})=>{
     await page.evaluate(delay=>{
       const original=window.ipc.postMessage;
       window.ipc.postMessage=body=>{original(body);const message=JSON.parse(body);
-        if(message.type==='select_tab')setTimeout(()=>{window.rake.apply({type:'select_tab',id:message.id});window.rake.apply({type:'tab_metadata',tabs:[1,2].map(id=>({id,title:`tab-${id}`,manual:null,busy:false})),active:message.id});},delay);
+        if(message.type==='select_tab')setTimeout(()=>{window.regie.apply({type:'select_tab',id:message.id});window.regie.apply({type:'tab_metadata',tabs:[1,2].map(id=>({id,title:`tab-${id}`,manual:null,busy:false})),active:message.id});},delay);
       };
     },delay);
     await page.getByText('tab-2',{exact:true}).dblclick();

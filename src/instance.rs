@@ -5,7 +5,7 @@
 //! and only the lock holder binds it, which gives the second launch a way to wake the panel.
 
 use std::fs::{File, TryLockError};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -17,11 +17,6 @@ pub const SOCKET_FILE: &str = "instance.sock";
 /// How long a second launch waits for the first to bind its socket.
 const CONNECT_ATTEMPTS: u32 = 20;
 const CONNECT_PAUSE: Duration = Duration::from_millis(25);
-
-/// Where Rake keeps its instance lock and socket, next to the configuration for the same user.
-pub fn state_dir(home: &Path) -> PathBuf {
-    home.join("Library/Application Support/Rake")
-}
 
 /// The running copy's claim on the app. Dropping it releases the lock and removes the socket.
 pub struct Instance {
@@ -59,8 +54,32 @@ impl Instance {
         let _ = std::fs::remove_file(&self.socket);
         let listener = UnixListener::bind(&self.socket)?;
         thread::spawn(move || {
-            for _ in listener.incoming().flatten() {
-                on_show();
+            for mut stream in listener.incoming().flatten() {
+                // Consume the existing four-byte request before closing the peer.
+                if stream.set_nonblocking(true).is_err() {
+                    continue;
+                }
+                let mut request = [0; 4];
+                let mut used = 0;
+                for _ in 0..CONNECT_ATTEMPTS {
+                    match stream.read(&mut request[used..]) {
+                        Ok(0) => break,
+                        Ok(count) => {
+                            used += count;
+                            if used == request.len() {
+                                break;
+                            }
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            thread::sleep(CONNECT_PAUSE)
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(_) => break,
+                    }
+                }
+                if used == request.len() && &request == b"show" {
+                    on_show();
+                }
             }
         });
         Ok(())
@@ -94,6 +113,70 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn old_and_new_clients_exclude_each_other_in_both_orders() {
+        for old_first in [true, false] {
+            // The full macOS TMPDIR plus Application Support exceeds sockaddr_un.
+            // A short, uniquely owned test HOME keeps the real compatibility suffix.
+            let home = PathBuf::from("/tmp").join(format!(
+                "rg-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir(&home).unwrap();
+            let old = home.join("Library/Application Support/Rake");
+            let new = crate::app_paths::AppPaths::new(&home).runtime;
+            let (first, second) = if old_first {
+                (&old, &new)
+            } else {
+                (&new, &old)
+            };
+            let owner = claim(first).unwrap().unwrap();
+            let (tx, rx) = mpsc::channel();
+            owner
+                .listen(move || {
+                    let _ = tx.send(());
+                })
+                .unwrap();
+            assert!(claim(second).unwrap().is_none());
+            // Saving new-brand data must never replace the already owned runtime socket.
+            let paths = crate::app_paths::AppPaths::new(&home);
+            crate::tab_layout::save_atomic(
+                &paths.layout,
+                &crate::tab_layout::SavedLayout {
+                    version: 1,
+                    selected: 0,
+                    tabs: vec![crate::tab_layout::SavedTab {
+                        cwd: home.clone(),
+                        name: Default::default(),
+                    }],
+                },
+            )
+            .unwrap();
+            request_show(second).unwrap();
+            rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            drop(owner);
+            // Concurrent PTY tests fork: their pre-exec children briefly inherit this
+            // CLOEXEC lock descriptor. Require release within a bound, not within
+            // the scheduling gap between drop and another thread's exec.
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                if claim(second).unwrap().is_some() {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "lock not released after owner drop"
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+            std::fs::remove_dir_all(home).unwrap();
+        }
+    }
 
     fn temp_dir(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -140,6 +223,26 @@ mod tests {
             .expect("the show request arrives");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn listener_keeps_connection_open_until_show_is_written() {
+        let dir = temp_dir("write");
+        let held = claim(&dir).unwrap().unwrap();
+        let (tx, rx) = mpsc::channel();
+        held.listen(move || {
+            let _ = tx.send(());
+        })
+        .unwrap();
+        let mut client = UnixStream::connect(dir.join(SOCKET_FILE)).unwrap();
+        assert!(
+            rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "listener must consume the request before closing the peer"
+        );
+        client.write_all(b"show").unwrap();
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        drop(held);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

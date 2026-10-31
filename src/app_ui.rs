@@ -35,11 +35,11 @@ impl AppUi {
             Some(Accelerator::new(Modifiers::META, Code::KeyW)),
         );
         let quit = MenuItem::new(
-            "Quit Rake",
+            format!("Quit {APP_NAME}"),
             true,
             Some(Accelerator::new(Modifiers::META, Code::KeyQ)),
         );
-        let tray_quit = MenuItem::new("Quit Rake", true, None);
+        let tray_quit = MenuItem::new(format!("Quit {APP_NAME}"), true, None);
         let tray = Menu::new();
         let about = PredefinedMenuItem::about(None, Some(about_metadata()));
         app.append_items(&[&about, &PredefinedMenuItem::separator(), &quit])
@@ -107,7 +107,7 @@ pub fn confirm_termination(names: &[String], appearance: Appearance) -> bool {
     let cancel = alert.addButtonWithTitle(&NSString::from_str("Cancel"));
     cancel.setKeyEquivalent(&NSString::from_str("\r"));
     alert.addButtonWithTitle(&NSString::from_str("Terminate"));
-    // Rake's panel sits at level 24; an ordinary modal alert would be hidden below it.
+    // Regie's panel sits at level 24; an ordinary modal alert would be hidden below it.
     alert.window().setLevel(25);
     alert.runModal() == 1001
 }

@@ -1,6 +1,6 @@
 (() => {
   'use strict';
-  const config = /*__RAKE_CONFIG__*/;
+  const config = /*__REGIE_CONFIG__*/;
   const container = document.getElementById('terminal');
   const sessions = new Map();
   let active = null;
@@ -110,7 +110,7 @@
       }
     }
   }
-  window.rake = {
+  window.regie = {
     apply,
     focus(id = active) { if (sessions.has(id)) sessions.get(id).terminal.focus(); }
   };

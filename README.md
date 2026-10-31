@@ -1,8 +1,8 @@
-# Rake
+# Regie
 
 [![CI](https://github.com/jdtobe/rake/actions/workflows/ci.yml/badge.svg)](https://github.com/jdtobe/rake/actions/workflows/ci.yml)
 
-Rake is a macOS-first Quake-style drop-down terminal written in Rust. Press a hotkey and a terminal panel slides down from the top of the screen; press it again and it slides away.
+Regie is a macOS-first Quake-style drop-down terminal written in Rust. Press a hotkey and a terminal panel slides down from the top of the screen; press it again and it slides away. Previously named Rake; the GitHub repository has not yet been renamed.
 
 ## Status
 
@@ -20,16 +20,16 @@ Rake is a macOS-first Quake-style drop-down terminal written in Rust. Press a ho
 | Configuration | Hotkey, window size, hide on focus lost, animation time (config file only) |
 | Settings menu in the menubar | Not started |
 | Embedded terminal (shell + rendering) | Independent persistent login-shell sessions; active-tab WebGL with a DOM fallback |
-| Terminal colours and font | Follows the macOS Terminal default profile; changes apply on restart |
+| Terminal colours and font | Candidate Regie Dark default, optional macOS Terminal colors; readable profile font kept independently; restart to change |
 | Tabs | Bottom/top strip, names, cwd inheritance, close/quit confirmation, optional layout restoration |
-| Profiles | Later; terminal colours still follow the Terminal default profile |
+| Profiles | Later; color source selectable in config, no profile editor |
 | Linux / Windows | Not tested |
 
 Developed and tested on macOS only.
 
 ## Install
 
-Download the latest `Rake-v….dmg`, open it and drag **Rake** onto **Applications**. The build is ad-hoc signed and not notarised, so the first launch needs Finder: right-click **Rake** and choose **Open** (macOS remembers the choice). Releases are manual; there is no auto-update.
+Regie development builds use `Regie-v….dmg` containing **Regie.app**; previously published releases may still be named Rake. Open the image and drag the app onto **Applications**. The build is ad-hoc signed and not notarised, so the first launch needs Finder: right-click the app and choose **Open** (macOS remembers the choice). Releases are manual; there is no auto-update.
 
 ## Run it
 
@@ -37,9 +37,9 @@ Download the latest `Rake-v….dmg`, open it and drag **Rake** onto **Applicatio
 cargo run
 ```
 
-Rake opens and focuses a terminal backed by your default login shell. The panel appears on the display under the mouse and stays there until hidden; the next show chooses again. The shell remains alive when the hotkey hides the window. An icon also appears in the menubar (no Dock icon): left-click toggles the panel, right-click opens **About** and **Quit**.
+Regie opens and focuses a terminal backed by your default login shell. The panel appears on the display under the mouse and stays there until hidden; the next show chooses again. The shell remains alive when the hotkey hides the window. An icon also appears in the menubar (no Dock icon): left-click toggles the panel, right-click opens **About** and **Quit**.
 
-Only one copy runs. Launching Rake again, from Finder or the binary, brings the existing panel forward and exits the new process, so quit the running copy before `cargo run`.
+Only one copy runs, including an old Rake copy. Launching again, from Finder or the binary, brings the existing panel forward and exits the new process, so quit the running copy before `cargo run`.
 
 ## Tabs
 
@@ -56,7 +56,7 @@ follow-up work, not implemented yet.
 | Cmd+1–8 | Select numbered tab |
 | Cmd+9 | Select last tab |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
-| Cmd+Q | Quit Rake |
+| Cmd+Q | Quit Regie |
 
 Closing a tab or quitting asks before terminating running apps, including
 background/stopped jobs; uncertain process inspection also asks. Cancellation
@@ -66,14 +66,21 @@ Cleanup targets the local session tree, not deliberately detached/reparented dae
 
 Startup defaults to one new tab. Opt-in restoration recreates tab order, names,
 selection and local directories with **fresh shells**, never SSH reconnections,
-running commands or scrollback. Rake does not restore command history; the shell's
+running commands or scrollback. Regie does not restore command history; the shell's
 normal history files still work. Saved layout lives in
-`~/Library/Application Support/Rake/tabs.json`. Missing directories fall back to
+`~/Library/Application Support/Regie/tabs.json`. Missing directories fall back to
 home with a notice.
+
+If the canonical layout is absent, restoration reads the old
+`~/Library/Application Support/Rake/tabs.json` with a notice. Future saves go to
+Regie; old layout bytes are left intact. Invalid/unreadable canonical entries do
+not silently roll back to legacy data. Lock/socket files deliberately remain in
+`~/Library/Application Support/Rake` so old/new copies exclude one another. There
+is no live-session transfer; quit old Rake yourself before trying the Regie build.
 
 ## Configure
 
-Optional. Create `~/.config/rake/config.toml`; a missing file means defaults. Changes need a restart. A bad file stops the app with an error naming the file and the problem.
+Optional. Create `~/.config/regie/config.toml`; if absent, Regie reads the old `~/.config/rake/config.toml` with a notice. No files are moved or overwritten. If neither exists, defaults apply. Changes need a restart. A bad canonical file stops the app rather than silently falling back.
 
 ```toml
 # Global key that shows/hides the terminal. Default: "Ctrl+`"
@@ -99,11 +106,21 @@ new_tab_directory = "current"
 startup_tabs = "new"
 # Last tab closed: new (default), hide, or quit. Hidden-empty summons create a tab.
 last_tab_action = "new"
-# Rake controls only: system (default), light or dark. Terminal profile is separate.
+# Regie controls only: system (default), light or dark. Terminal colors are separate.
 appearance = "system"
+# Candidate Regie Dark (default), or macos to follow Terminal profile colors.
+terminal_theme = "regie"
 ```
 
 The panel opens at the configured size and cannot be resized by dragging.
+
+Regie Dark is an intentional default change, including for old config files with
+no `terminal_theme` key. Use `"macos"` to keep the previous color policy; unreadable
+profile colors fall back to Regie Dark with a notice. Both modes retain readable
+macOS Terminal font family/size, otherwise the existing monospace fallback. UI
+appearance never changes the terminal palette. The palette remains provisional:
+see [Regie acceptance and local preview](docs/testing/regie.md) and the
+[brand reference](docs/brand.md). A light terminal theme and Settings UI are deferred.
 
 Hotkey strings use the [`global-hotkey`](https://docs.rs/global-hotkey) format, such as `Ctrl+Shift+K`, `Cmd+Backquote` or `F12`. Note that a global hotkey is captured system-wide, so the default `Ctrl+\`` will also stop working inside other apps that use it, such as editors.
 
@@ -132,7 +149,7 @@ Pull requests and pushes to **main** run the same shared checks (feature-branch
 pushes do not also trigger duplicate runs): formatting, strict Clippy, all-target
 Rust tests, doc tests, real WebKit tests and a built/mounted development DMG on
 macOS; actionlint, ShellCheck and Python script tests on Ubuntu. This does not
-claim Linux support for Rake. Failed browser checks retain traces, screenshots,
+claim Linux support for Regie. Failed browser checks retain traces, screenshots,
 videos and the HTML report as workflow artifacts for seven days.
 
 Rust and npm dependency audits run with those checks and weekly on Monday at
@@ -161,7 +178,7 @@ exact checked commit. A failed publication after tag creation can leave a tag;
 the next run uses the next build number rather than overwriting it.
 
 Only the final publish job receives a write token; it does not check out or execute
-repository code. It publishes **one arm64 DMG**, with `Rake.app` and an Applications
+repository code. It publishes **one arm64 DMG**, with `Regie.app` and an Applications
 symlink, and includes its SHA-256 in generated release notes. Checks and builds
 have read-only tokens. Images are verified for checksum integrity, bundle versions,
 executable architecture, icon, ad-hoc signature and Applications link before
@@ -171,8 +188,8 @@ To build and verify a development image locally on Apple Silicon macOS:
 
 ```bash
 cargo build --release --locked
-scripts/package.sh                  # prints dist/Rake-v0.1.0-arm64.dmg
-scripts/verify-package.sh dist/Rake-v0.1.0-arm64.dmg 0.1.0
+scripts/package.sh                  # prints dist/Regie-v0.1.0-arm64.dmg
+scripts/verify-package.sh dist/Regie-v0.1.0-arm64.dmg 0.1.0
 python3 -m unittest discover -s tests/ci -v  # Python 3.11+; includes real DMG tests
 ```
 
