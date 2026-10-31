@@ -6,6 +6,7 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 
 #[derive(Debug, Clone, Copy)]
 pub enum AppCommand {
+    OpenSettings,
     NewTab,
     CloseActiveTab,
     Quit,
@@ -14,6 +15,30 @@ pub enum AppCommand {
 pub struct AppUi {
     pub tray: Menu,
     _menubar: Menu,
+    tray_settings: MenuItem,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeAppearance {
+    System,
+    Light,
+    Dark,
+}
+
+pub fn apply_appearance_with(appearance: Appearance, apply: impl FnOnce(NativeAppearance)) {
+    let native = match appearance {
+        Appearance::System => NativeAppearance::System,
+        Appearance::Light => NativeAppearance::Light,
+        Appearance::Dark => NativeAppearance::Dark,
+    };
+    apply(native);
+}
+
+pub fn apply_appearance(appearance: Appearance) {
+    #[cfg(target_os = "macos")]
+    set_appearance(appearance);
+    #[cfg(not(target_os = "macos"))]
+    let _ = appearance;
 }
 
 impl AppUi {
@@ -40,18 +65,37 @@ impl AppUi {
             Some(Accelerator::new(Modifiers::META, Code::KeyQ)),
         );
         let tray_quit = MenuItem::new(format!("Quit {APP_NAME}"), true, None);
+        let settings = MenuItem::new(
+            "Settings…",
+            true,
+            Some(Accelerator::new(Modifiers::META, Code::Comma)),
+        );
+        let tray_settings = MenuItem::new("Settings…", true, None);
         let tray = Menu::new();
         let about = PredefinedMenuItem::about(None, Some(about_metadata()));
-        app.append_items(&[&about, &PredefinedMenuItem::separator(), &quit])
-            .map_err(|e| e.to_string())?;
+        app.append_items(&[
+            &about,
+            &PredefinedMenuItem::separator(),
+            &settings,
+            &PredefinedMenuItem::separator(),
+            &quit,
+        ])
+        .map_err(|e| e.to_string())?;
         file.append_items(&[&new, &close])
             .map_err(|e| e.to_string())?;
         menubar
             .append_items(&[&app, &file])
             .map_err(|e| e.to_string())?;
-        tray.append_items(&[&about, &PredefinedMenuItem::separator(), &tray_quit])
-            .map_err(|e| e.to_string())?;
+        tray.append_items(&[
+            &about,
+            &tray_settings,
+            &PredefinedMenuItem::separator(),
+            &tray_quit,
+        ])
+        .map_err(|e| e.to_string())?;
         let actions = [
+            (settings.id().clone(), AppCommand::OpenSettings),
+            (tray_settings.id().clone(), AppCommand::OpenSettings),
             (new.id().clone(), AppCommand::NewTab),
             (close.id().clone(), AppCommand::CloseActiveTab),
             (quit.id().clone(), AppCommand::Quit),
@@ -72,7 +116,16 @@ impl AppUi {
         Ok(Self {
             tray,
             _menubar: menubar,
+            tray_settings,
         })
+    }
+
+    pub fn set_config_warning(&self, warning: bool) {
+        self.tray_settings.set_text(if warning {
+            "Configuration needs attention…"
+        } else {
+            "Settings…"
+        });
     }
 }
 
@@ -83,12 +136,18 @@ pub fn set_appearance(appearance: Appearance) {
         NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
     };
     let marker = MainThreadMarker::new().expect("AppKit runs on main thread");
-    let appearance = match appearance {
-        Appearance::System => None,
-        Appearance::Light => NSAppearance::appearanceNamed(unsafe { NSAppearanceNameAqua }),
-        Appearance::Dark => NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua }),
-    };
-    NSApplication::sharedApplication(marker).setAppearance(appearance.as_deref());
+    apply_appearance_with(appearance, |appearance| {
+        let appearance = match appearance {
+            NativeAppearance::System => None,
+            NativeAppearance::Light => {
+                NSAppearance::appearanceNamed(unsafe { NSAppearanceNameAqua })
+            }
+            NativeAppearance::Dark => {
+                NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua })
+            }
+        };
+        NSApplication::sharedApplication(marker).setAppearance(appearance.as_deref());
+    });
 }
 
 #[cfg(target_os = "macos")]
@@ -115,4 +174,23 @@ pub fn confirm_termination(names: &[String], appearance: Appearance) -> bool {
 #[cfg(not(target_os = "macos"))]
 pub fn confirm_termination(_: &[String], _: Appearance) -> bool {
     false
+}
+
+#[cfg(test)]
+mod appearance_tests {
+    use super::*;
+
+    #[test]
+    fn native_appearance_adapter_maps_each_choice_including_system() {
+        let cases = [
+            (Appearance::System, NativeAppearance::System),
+            (Appearance::Light, NativeAppearance::Light),
+            (Appearance::Dark, NativeAppearance::Dark),
+        ];
+        for (appearance, expected) in cases {
+            let mut applied = None;
+            apply_appearance_with(appearance, |value| applied = Some(value));
+            assert_eq!(applied, Some(expected));
+        }
+    }
 }

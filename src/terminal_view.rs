@@ -163,6 +163,15 @@ mod tests {
     }
 
     #[test]
+    fn terminal_theme_delivery_updates_every_live_xterm_without_recreation() {
+        let html = terminal_html(&TerminalTheme::default());
+        assert!(html.contains("for (const session of sessions.values())"));
+        assert!(html.contains("session.terminal.options.theme = config.theme"));
+        assert!(html.contains("session.terminal.refresh"));
+        assert!(!html.contains("session.terminal.clear()"));
+    }
+
+    #[test]
     fn terminal_document_loads_the_webgl_renderer_before_the_app_script() {
         let html = terminal_html(&TerminalTheme::default());
         assert!(

@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Settings</title><link rel="stylesheet" href="settings.css"></head>
+<body><div class="layout">
+  <aside><h1>Settings</h1><label class="search"><span class="sr-only">Search settings</span><input type="search" aria-label="Search settings" placeholder="Search settings"><button id="clear-search" aria-label="Clear search">×</button></label>
+    <nav aria-label="Settings sections"><a href="#general">General</a><a href="#window">Window</a><a href="#tabs">Tabs</a><a href="#appearance">Appearance</a></nav>
+    <button id="reset-all">Reset All…</button>
+  </aside><main><div id="status" role="status" aria-live="polite"></div><div id="warning" role="alert" hidden></div><button id="open-config" hidden>Open config file</button><button id="retry" hidden>Retry saving settings</button>
+    <div id="empty" hidden>No settings match your search.</div><div id="settings-list">
+      <section id="general"><h2>General</h2></section><section id="window"><h2>Window</h2></section><section id="tabs"><h2>Tabs</h2></section><section id="appearance"><h2>Appearance</h2></section>
+    </div>
+  </main>
+</div><dialog id="confirm-reset"><form method="dialog"><h2>Reset all settings?</h2><p>This restores Regie's settings defaults. It does not reset tabs, saved sessions, or shell history.</p><button value="cancel">Cancel</button><button id="confirm-reset-action" value="confirm">Reset All</button></form></dialog><script src="settings.js"></script></body></html>

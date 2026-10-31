@@ -14,6 +14,10 @@ pub mod process;
 pub mod pty;
 pub mod session_output;
 pub mod sessions;
+pub mod settings;
+pub mod settings_store;
+pub mod settings_view;
+pub mod settings_watch;
 pub mod tab_layout;
 pub mod tabs;
 pub mod terminal_profile;
@@ -43,6 +47,24 @@ pub fn build_icon_rgba() -> Vec<u8> {
 
 pub fn build_icon() -> Icon {
     Icon::from_rgba(build_icon_rgba(), ICON_SIZE, ICON_SIZE).expect("icon buffer matches size")
+}
+
+pub fn build_warning_icon_rgba() -> Vec<u8> {
+    let mut pixels = build_icon_rgba();
+    for y in 2..12 {
+        for x in 32..42 {
+            if (x as i32 - 37).pow(2) + (y as i32 - 7).pow(2) <= 25 {
+                let offset = ((y * ICON_SIZE + x) * 4) as usize;
+                pixels[offset..offset + 4].copy_from_slice(&[0, 0, 0, 255]);
+            }
+        }
+    }
+    pixels
+}
+
+pub fn build_warning_icon() -> Icon {
+    Icon::from_rgba(build_warning_icon_rgba(), ICON_SIZE, ICON_SIZE)
+        .expect("icon buffer matches size")
 }
 
 /// The colour app icon, compiled in from the same master that produces the menubar mark.
@@ -115,6 +137,19 @@ mod tests {
             build_icon_rgba().len(),
             (ICON_SIZE * ICON_SIZE * 4) as usize
         );
+    }
+
+    #[test]
+    fn config_warning_icon_adds_a_visible_template_badge() {
+        let normal = build_icon_rgba();
+        let warning = build_warning_icon_rgba();
+        assert_eq!(warning.len(), normal.len());
+        assert_ne!(warning, normal);
+        assert!(warning
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| p[0..3] == [0, 0, 0]));
     }
 
     #[test]

@@ -17,10 +17,10 @@ Regie is a macOS-first Quake-style drop-down terminal written in Rust. Press a h
 | Global hotkey | Working |
 | Drop-down window at the top of the screen | Working; opens on the display under the mouse and shows on every Space |
 | Slide animation | Working; short hitch at the start of each slide in |
-| Configuration | Hotkey, window size, hide on focus lost, animation time (config file only) |
-| Settings menu in the menubar | Not started |
+| Configuration | Hotkey, window, tabs and appearance in TOML and the Settings window |
+| Settings menu in the menubar | Development preview; native interaction still needs hand verification |
 | Embedded terminal (shell + rendering) | Independent persistent login-shell sessions; active-tab WebGL with a DOM fallback |
-| Terminal colours and font | Candidate Regie Dark default, optional macOS Terminal colors; readable profile font kept independently; restart to change |
+| Terminal colours and font | Candidate Regie Dark default, optional macOS Terminal colors; readable profile font kept independently |
 | Tabs | Bottom/top strip, names, cwd inheritance, close/quit confirmation, optional layout restoration |
 | Profiles | Later; color source selectable in config, no profile editor |
 | Linux / Windows | Not tested |
@@ -37,7 +37,7 @@ Regie development builds use `Regie-v….dmg` containing **Regie.app**; previous
 cargo run
 ```
 
-Regie opens and focuses a terminal backed by your default login shell. The panel appears on the display under the mouse and stays there until hidden; the next show chooses again. The shell remains alive when the hotkey hides the window. An icon also appears in the menubar (no Dock icon): left-click toggles the panel, right-click opens **About** and **Quit**.
+Regie opens and focuses a terminal backed by your default login shell. The panel appears on the display under the mouse and stays there until hidden; the next show chooses again. The shell remains alive when the hotkey hides the window. An icon also appears in the menubar (no Dock icon): left-click toggles the panel; right-click opens **About**, **Settings…** and **Quit**.
 
 Only one copy runs, including an old Rake copy. Launching again, from Finder or the binary, brings the existing panel forward and exits the new process, so quit the running copy before `cargo run`.
 
@@ -80,7 +80,9 @@ is no live-session transfer; quit old Rake yourself before trying the Regie buil
 
 ## Configure
 
-Optional. Create `~/.config/regie/config.toml`; if absent, Regie reads the old `~/.config/rake/config.toml` with a notice. No files are moved or overwritten. If neither exists, defaults apply. Changes need a restart. A bad canonical file stops the app rather than silently falling back.
+Open **Settings…** from the menubar menu or press **Cmd+,**. Changes are saved to `~/.config/regie/config.toml`, and valid external edits are reloaded. Tab startup mode applies on the next launch; other settings are intended to apply immediately. The Settings window includes search and reset controls.
+
+The file remains optional and editable by hand. If the canonical file is absent, Regie reads the old `~/.config/rake/config.toml` without modifying it; new UI edits are written to the canonical path. Invalid configuration opens Settings with a warning and leaves the original file untouched. At launch, safe defaults are used until it is repaired. Parseable files allow individual fields to be corrected; malformed TOML needs manual repair. When the configuration remains invalid, saved edits do not become active. Config writes preserve comments and refuse to replace a canonical symbolic link. A detected concurrent change is reported rather than intentionally overwritten, though a small race with external editors remains between the final check and rename.
 
 ```toml
 # Global key that shows/hides the terminal. Default: "Ctrl+`"
@@ -120,7 +122,7 @@ profile colors fall back to Regie Dark with a notice. Both modes retain readable
 macOS Terminal font family/size, otherwise the existing monospace fallback. UI
 appearance never changes the terminal palette. The palette remains provisional:
 see [Regie acceptance and local preview](docs/testing/regie.md) and the
-[brand reference](docs/brand.md). A light terminal theme and Settings UI are deferred.
+[brand reference](docs/brand.md). A light terminal theme is deferred.
 
 Hotkey strings use the [`global-hotkey`](https://docs.rs/global-hotkey) format, such as `Ctrl+Shift+K`, `Cmd+Backquote` or `F12`. Note that a global hotkey is captured system-wide, so the default `Ctrl+\`` will also stop working inside other apps that use it, such as editors.
 

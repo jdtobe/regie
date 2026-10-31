@@ -17,6 +17,57 @@ use crate::terminal_view::TerminalView;
 use crate::theme::TerminalTheme;
 use crate::APP_NAME;
 
+fn resized_panel(display: Display, width_percent: u8, height_percent: u8) -> (Rect, i32) {
+    let home = window_rect(
+        display.position,
+        display.size,
+        display.top_inset,
+        width_percent,
+        height_percent,
+    );
+    let hidden_y = display.position.1 - home.height as i32;
+    (home, hidden_y)
+}
+
+fn retimed_slide(
+    now: Instant,
+    current_y: i32,
+    target_y: i32,
+    travel: u32,
+    duration: Duration,
+) -> Slide {
+    Slide::toward(now, current_y, target_y, travel, duration)
+}
+
+struct SlideConfigChange {
+    now: Instant,
+    slide: Option<Slide>,
+    visible: bool,
+    target_y: i32,
+    travel: u32,
+    old_duration: Duration,
+    new_duration: Duration,
+    size_changed: bool,
+}
+
+fn retime_for_config(change: SlideConfigChange) -> Option<(i32, Slide)> {
+    let slide = change.slide?;
+    if !change.visible || (!change.size_changed && change.old_duration == change.new_duration) {
+        return None;
+    }
+    let current_y = slide.y_at(change.now);
+    Some((
+        current_y,
+        retimed_slide(
+            change.now,
+            current_y,
+            change.target_y,
+            change.travel,
+            change.new_duration,
+        ),
+    ))
+}
+
 /// macOS keeps normal and floating windows below the menubar and silently clamps any frame that
 /// would go above it, which flattens the whole slide into one position. A window at the menubar's
 /// own level is not clamped, and the menubar is drawn in front of it, so the panel slides out
@@ -222,14 +273,9 @@ impl DropDown {
                     self.window.set_focus();
                     return;
                 };
-                let home = window_rect(
-                    display.position,
-                    display.size,
-                    display.top_inset,
-                    self.width_percent,
-                    self.height_percent,
-                );
-                self.hidden_y = display.position.1 - home.height as i32;
+                let (home, hidden_y) =
+                    resized_panel(display, self.width_percent, self.height_percent);
+                self.hidden_y = hidden_y;
                 home
             }
         };
@@ -309,10 +355,164 @@ impl DropDown {
             .set_bounds(self.window.inner_size(), self.window.scale_factor())
     }
 
+    pub fn apply_config(&mut self, config: &Config, theme: &TerminalTheme) -> Result<(), String> {
+        let size_changed = self.width_percent != config.width_percent
+            || self.height_percent != config.height_percent;
+        let old_animation = self.animation;
+        self.width_percent = config.width_percent;
+        self.height_percent = config.height_percent;
+        self.animation = Duration::from_millis(config.animation_ms.into());
+        if size_changed {
+            if let Some(display) = self.display_under_cursor() {
+                let (home, hidden_y) =
+                    resized_panel(display, self.width_percent, self.height_percent);
+                self.hidden_y = hidden_y;
+                self.home = Some(home);
+                self.window
+                    .set_inner_size(PhysicalSize::new(home.width, home.height));
+                self.window
+                    .set_outer_position(PhysicalPosition::new(home.x, self.y));
+                if self.visible && self.slide.is_none() {
+                    self.y = home.y;
+                    self.window
+                        .set_outer_position(PhysicalPosition::new(home.x, home.y));
+                }
+            }
+        }
+        if let Some(home) = self.home {
+            let now = Instant::now();
+            let target = if self.hiding { self.hidden_y } else { home.y };
+            if let Some((current_y, slide)) = retime_for_config(SlideConfigChange {
+                now,
+                slide: self.slide,
+                visible: self.visible,
+                target_y: target,
+                travel: home.y.abs_diff(self.hidden_y),
+                old_duration: old_animation,
+                new_duration: self.animation,
+                size_changed,
+            }) {
+                self.y = current_y;
+                self.slide = Some(slide);
+                self.window
+                    .set_outer_position(PhysicalPosition::new(home.x, self.y));
+                self.tick(now);
+            }
+        }
+        self.terminal.apply(&[
+            UiDelivery::TerminalTheme {
+                theme: theme.config_json(),
+            },
+            UiDelivery::TabPosition {
+                position: config.tab_position,
+            },
+            UiDelivery::Appearance {
+                appearance: config.appearance,
+            },
+        ])?;
+        if self.visible {
+            self.resize_terminal_view()?;
+        }
+        Ok(())
+    }
+
     pub fn apply_ui(&mut self, deliveries: &[UiDelivery]) -> Result<(), String> {
         self.terminal.apply(deliveries)
     }
     pub fn is_focused(&self) -> bool {
         self.window.is_focused()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duration_only_change_retimes_in_flight_slide_from_current_y() {
+        let now = Instant::now();
+        let original = Slide::new(
+            now - Duration::from_millis(20),
+            Duration::from_millis(200),
+            -400,
+            0,
+        );
+        let (current, slide) = retime_for_config(SlideConfigChange {
+            now,
+            slide: Some(original),
+            visible: true,
+            target_y: 0,
+            travel: 400,
+            old_duration: Duration::from_millis(200),
+            new_duration: Duration::from_millis(100),
+            size_changed: false,
+        })
+        .unwrap();
+        assert_eq!(slide.y_at(now), current);
+        assert_eq!(slide.target(), 0);
+        assert!(!slide.is_done(now + Duration::from_millis(80)));
+        assert!(slide.is_done(now + Duration::from_millis(82)));
+    }
+
+    #[test]
+    fn duration_change_to_zero_finishes_slide_at_its_endpoint_immediately() {
+        let now = Instant::now();
+        let original = Slide::new(
+            now - Duration::from_millis(20),
+            Duration::from_millis(200),
+            -400,
+            0,
+        );
+        let (_, slide) = retime_for_config(SlideConfigChange {
+            now,
+            slide: Some(original),
+            visible: true,
+            target_y: 0,
+            travel: 400,
+            old_duration: Duration::from_millis(200),
+            new_duration: Duration::ZERO,
+            size_changed: false,
+        })
+        .unwrap();
+        assert!(slide.is_done(now));
+        assert_eq!(slide.y_at(now), 0);
+    }
+
+    #[test]
+    fn panel_resize_recomputes_resting_and_hidden_positions_from_new_percentages() {
+        let display = Display {
+            position: (0, 0),
+            size: (1200, 800),
+            top_inset: 24,
+        };
+        let (home, hidden_y) = resized_panel(display, 75, 60);
+        assert_eq!(home.width, 900);
+        assert_eq!(home.height, 465);
+        assert_eq!(home.y, 24);
+        assert_eq!(hidden_y, -465);
+    }
+
+    #[test]
+    fn resize_animation_can_continue_from_current_position_to_new_endpoint() {
+        let now = Instant::now();
+        let (home, hidden_y) = resized_panel(
+            Display {
+                position: (0, 0),
+                size: (1000, 800),
+                top_inset: 20,
+            },
+            100,
+            70,
+        );
+        let current_y = 3;
+        let slide = Slide::toward(
+            now,
+            current_y,
+            home.y,
+            home.y.abs_diff(hidden_y),
+            Duration::from_millis(200),
+        );
+        assert_eq!(slide.y_at(now), current_y);
+        assert_eq!(slide.y_at(now + Duration::from_millis(500)), home.y);
     }
 }
