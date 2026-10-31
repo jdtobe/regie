@@ -125,6 +125,7 @@ mod tests {
             ansi: None,
             font_family: Some("Menlo".to_string()),
             font_size: Some(14.7),
+            ..TerminalTheme::profile_fallback()
         };
         let html = terminal_html(&theme);
         assert!(html.contains(r##""foreground":"#d0d0d0""##));

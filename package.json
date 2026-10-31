@@ -1,6 +1,9 @@
 {
   "name": "regie-terminal-tests",
   "private": true,
-  "scripts": { "test": "playwright test --project=webkit" },
+  "scripts": {
+    "pretest": "REGIE_TERMINAL_FIXTURE_DIR=target/terminal-fixtures cargo test --test terminal_document",
+    "test": "playwright test --project=webkit"
+  },
   "devDependencies": { "@playwright/test": "1.56.1" }
 }
