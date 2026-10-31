@@ -445,6 +445,7 @@ impl Workspace {
             }
             WorkspaceCommand::Native(AppCommand::NewTab)
             | WorkspaceCommand::Ui(WorkspaceRequest::NewTab {}) => self.new_tab(None),
+            WorkspaceCommand::Native(AppCommand::OpenSettings) => {}
             WorkspaceCommand::Native(AppCommand::Quit) => self.request_close(CloseIntent::Quit),
             WorkspaceCommand::Native(AppCommand::CloseActiveTab) => {
                 if let Some(id) = self.tabs.active() {

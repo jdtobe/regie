@@ -36,7 +36,7 @@ impl SettingKey {
         Self::Appearance,
         Self::TerminalTheme,
     ];
-    fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Self::Hotkey => "hotkey",
             Self::HeightPercent => "height_percent",

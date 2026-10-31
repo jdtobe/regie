@@ -7,6 +7,10 @@ use regie::config;
 use regie::dropdown::DropDown;
 use regie::hotkey::{should_toggle, Visibility};
 use regie::session_output::SessionOutput;
+use regie::settings::{SettingsController, SettingsEffect, SettingsResult};
+use regie::settings_store::{ConfigStatus, SettingKey, SettingsStore};
+use regie::settings_view::{self, SettingsRequest, SettingsView};
+use regie::settings_watch::{SettingsWatch, SettingsWatchEvent};
 use regie::terminal_protocol::{parse_workspace_request, UiDelivery};
 use regie::workspace::{Workspace, WorkspaceCommand, WorkspaceEffect};
 use regie::{build_icon, instance, terminal_profile, APP_NAME};
@@ -31,6 +35,8 @@ enum AppEvent {
     Request(String),
     Wake,
     Menu(AppCommand),
+    Settings(SettingsRequest),
+    SettingsWatch(SettingsWatchEvent),
 }
 
 fn fail(message: &str) -> ! {
@@ -50,12 +56,13 @@ fn main() {
         }
         Err(error) => fail(&format!("could not guard against a second copy: {error}")),
     };
-    let loaded = config::load_compatible(&paths).unwrap_or_else(|e| fail(&e));
-    for notice in loaded.notices {
-        eprintln!("{notice}");
-    }
-    let config = loaded.config;
-    let hotkey = config.hotkey().unwrap_or_else(|e| fail(&e));
+    let snapshot = SettingsStore::read(&paths);
+    let mut config = match &snapshot.status {
+        ConfigStatus::Valid(config) => config.clone(),
+        _ => config::Config::default(),
+    };
+    let mut settings = SettingsController::new(snapshot, config.clone());
+    let mut hotkey = config.hotkey().unwrap_or_else(|e| fail(&e));
     let resolved = regie::theme::resolve(
         config.terminal_theme,
         terminal_profile::from_default_terminal(),
@@ -88,16 +95,27 @@ fn main() {
     output.set_waker(move || {
         let _ = wake_proxy.send_event(AppEvent::Wake);
     });
-    let mut workspace = Workspace::new(config.clone(), home, paths, output);
+    let mut workspace = Workspace::new(config.clone(), home, paths.clone(), output);
     let mut dropdown: Option<DropDown> = None;
     let mut tray: Option<TrayIcon> = None;
     let mut ui: Option<AppUi> = None;
     let mut manager: Option<GlobalHotKeyManager> = None;
     let mut visibility = Visibility::Shown;
     let mut show_on_launch = false;
+    let mut settings_window: Option<SettingsView> = None;
+    let mut settings_ready = false;
+    let mut focus_check_pending = false;
+    let mut settings_warning: Option<String> = None;
+    let mut warning_icon = false;
+    let watch_proxy = proxy.clone();
+    let watcher = SettingsWatch::new(paths.clone(), move |event| {
+        let _ = watch_proxy.send_event(AppEvent::SettingsWatch(event));
+    });
+    let mut watcher_warning = watcher.as_ref().err().cloned();
 
     event_loop.run(move |event, target, control_flow| {
         *control_flow = ControlFlow::Wait;
+        let mut setting_effects = Vec::new();
         let effects = match event {
             Event::NewEvents(StartCause::Init) => {
                 let menu_proxy = proxy.clone();
@@ -139,9 +157,9 @@ fn main() {
                 }));
                 let hotkey_manager =
                     GlobalHotKeyManager::new().unwrap_or_else(|e| fail(&e.to_string()));
-                hotkey_manager
-                    .register(hotkey)
-                    .unwrap_or_else(|e| fail(&e.to_string()));
+                if let Err(error) = hotkey_manager.register(hotkey) {
+                    settings_warning = Some(format!("Could not register shortcut: {error}"));
+                }
                 manager = Some(hotkey_manager);
                 let ipc_proxy = proxy.clone();
                 dropdown = Some(
@@ -151,6 +169,7 @@ fn main() {
                     .unwrap_or_else(|e| fail(&e)),
                 );
                 show_on_launch = true;
+                setting_effects.extend(settings.initial_effects());
                 workspace.handle(WorkspaceCommand::Start)
             }
             Event::UserEvent(AppEvent::Hotkey(event))
@@ -164,6 +183,10 @@ fn main() {
             Event::UserEvent(AppEvent::ShowRequest) | Event::Reopen { .. } => {
                 workspace.handle(WorkspaceCommand::Summon)
             }
+            Event::UserEvent(AppEvent::Menu(AppCommand::OpenSettings)) => {
+                setting_effects.push(SettingsEffect::OpenSettings);
+                vec![]
+            }
             Event::UserEvent(AppEvent::Menu(command)) => {
                 workspace.handle(WorkspaceCommand::Native(command))
             }
@@ -175,6 +198,67 @@ fn main() {
                 }
             },
             Event::UserEvent(AppEvent::Wake) => workspace.handle(WorkspaceCommand::Pump),
+            Event::UserEvent(AppEvent::SettingsWatch(event)) => {
+                match event {
+                    SettingsWatchEvent::Changed => setting_effects
+                        .extend(settings.external_change(SettingsStore::read(&paths))),
+                    SettingsWatchEvent::Failed(error) => {
+                        watcher_warning = Some(error);
+                        setting_effects.push(SettingsEffect::Render);
+                    }
+                }
+                vec![]
+            }
+            Event::UserEvent(AppEvent::Settings(request)) => {
+                match request {
+                    SettingsRequest::Ready => {
+                        settings_ready = true;
+                        setting_effects.push(SettingsEffect::Render);
+                    }
+                    SettingsRequest::Edit { key, value } => {
+                        if let Ok(key) = settings_view::decode_key(&key) {
+                            if let Ok(value) = settings_view::decode_value(key, value) {
+                                setting_effects.extend(settings.edit(key, value));
+                            }
+                        }
+                    }
+                    SettingsRequest::ResetOne { key } => {
+                        if let Ok(key) = settings_view::decode_key(&key) {
+                            if let Some(value) =
+                                regie::settings::value_for(&config::Config::default(), key)
+                            {
+                                setting_effects.extend(settings.edit(key, value));
+                            }
+                        }
+                    }
+                    SettingsRequest::ResetAll => setting_effects.extend(settings.reset_all()),
+                    SettingsRequest::Retry => setting_effects.extend(settings.retry()),
+                    SettingsRequest::Close => {
+                        if let Some(window) = &settings_window {
+                            window.hide();
+                        }
+                    }
+                    SettingsRequest::OpenFile => {
+                        let _ = std::process::Command::new("open")
+                            .arg(&settings.snapshot().path)
+                            .spawn();
+                    }
+                }
+                vec![]
+            }
+            Event::WindowEvent {
+                window_id,
+                event: WindowEvent::CloseRequested,
+                ..
+            } if settings_window
+                .as_ref()
+                .is_some_and(|window| window.window_id() == window_id) =>
+            {
+                if let Some(window) = &settings_window {
+                    window.hide();
+                }
+                vec![]
+            }
             Event::WindowEvent {
                 window_id,
                 event: WindowEvent::Resized(_),
@@ -190,18 +274,33 @@ fn main() {
                 event: WindowEvent::Focused(false),
                 ..
             } => {
-                if workspace.hide_on_focus_loss() && visibility == Visibility::Shown {
-                    if let Some(d) = dropdown
-                        .as_mut()
-                        .filter(|d| d.window_id() == window_id && !d.is_focused())
-                    {
-                        visibility = Visibility::Hidden;
-                        d.hide(Instant::now());
-                    }
+                if dropdown
+                    .as_ref()
+                    .is_some_and(|d| d.window_id() == window_id)
+                    || settings_window
+                        .as_ref()
+                        .is_some_and(|w| w.window_id() == window_id)
+                {
+                    focus_check_pending = true;
                 }
                 vec![]
             }
             Event::MainEventsCleared => {
+                if focus_check_pending {
+                    focus_check_pending = false;
+                    if workspace.hide_on_focus_loss()
+                        && visibility == Visibility::Shown
+                        && !settings_window
+                            .as_ref()
+                            .is_some_and(SettingsView::is_focused)
+                        && dropdown.as_ref().is_some_and(|d| !d.is_focused())
+                    {
+                        visibility = Visibility::Hidden;
+                        if let Some(d) = dropdown.as_mut() {
+                            d.hide(Instant::now());
+                        }
+                    }
+                }
                 if let Some(d) = dropdown.as_mut() {
                     if show_on_launch {
                         show_on_launch = false;
@@ -213,6 +312,140 @@ fn main() {
             }
             _ => vec![],
         };
+        let mut pending: VecDeque<_> = setting_effects.into();
+        while let Some(effect) = pending.pop_front() {
+            match effect {
+                SettingsEffect::OpenSettings => {
+                    if settings_window.is_none() {
+                        let settings_proxy = proxy.clone();
+                        match SettingsView::new(target, move |request| {
+                            let _ = settings_proxy.send_event(AppEvent::Settings(request));
+                        }) {
+                            Ok(window) => settings_window = Some(window),
+                            Err(error) => {
+                                settings_warning = Some(error);
+                            }
+                        }
+                    }
+                    if let Some(window) = &settings_window {
+                        window.show();
+                    }
+                }
+                SettingsEffect::ShowWarning(message) | SettingsEffect::ShowError(message) => {
+                    eprintln!("{message}");
+                    settings_warning = Some(message);
+                }
+                SettingsEffect::ClearWarning => settings_warning = None,
+                SettingsEffect::Render => {
+                    if settings_ready {
+                        if let Some(window) = &settings_window {
+                            if let Err(error) = window.render(&settings_view::view_state(
+                                &settings,
+                                settings_warning.clone().or_else(|| watcher_warning.clone()),
+                            )) {
+                                eprintln!("{error}");
+                            }
+                        }
+                    }
+                }
+                SettingsEffect::Write {
+                    generation,
+                    changes,
+                } => {
+                    let expected = settings.snapshot().clone();
+                    let replacement = changes.iter().find_map(|(key, value)| match (key, value) {
+                        (SettingKey::Hotkey, regie::settings_store::SettingValue::String(text)) => {
+                            regie::hotkey::parse_hotkey(text).ok()
+                        }
+                        _ => None,
+                    });
+                    let result = if let Some(new) = replacement.filter(|new| *new != hotkey) {
+                        if let Some(manager) = manager.as_mut() {
+                            let mut written = None;
+                            let outcome =
+                                regie::hotkey::replace_hotkey(manager, hotkey, new, || {
+                                    let snapshot =
+                                        SettingsStore::write(&paths, &expected, &changes)
+                                            .map_err(|e| format!("{e:?}"))?;
+                                    written = Some(snapshot);
+                                    Ok(())
+                                });
+                            match outcome {
+                                Ok(()) => {
+                                    let snapshot = written.expect("successful write");
+                                    if matches!(snapshot.status, ConfigStatus::Valid(_)) {
+                                        hotkey = new;
+                                        Ok(snapshot)
+                                    } else {
+                                        // The candidate was tested and saved, but invalid files must
+                                        // keep the previously active configuration until repaired.
+                                        match regie::hotkey::replace_hotkey(manager, new, hotkey, || Ok(())) {
+                                            Ok(()) => Ok(snapshot),
+                                            Err(error) => {
+                                                hotkey = new;
+                                                Err(format!("Settings were saved, but restoring the previous shortcut failed: {error}"))
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(error) => Err(error.to_string()),
+                            }
+                        } else {
+                            Err("Shortcut manager unavailable".into())
+                        }
+                    } else {
+                        SettingsStore::write(&paths, &expected, &changes)
+                            .map_err(|e| format!("{e:?}"))
+                    };
+                    pending.extend(settings.finish(SettingsResult::Write { generation, result }));
+                }
+                SettingsEffect::Apply {
+                    generation,
+                    config: next,
+                } => {
+                    let result = (|| -> Result<(), String> {
+                        let new_hotkey = next.hotkey()?;
+                        if new_hotkey != hotkey {
+                            let manager = manager.as_mut().ok_or("Shortcut manager unavailable")?;
+                            regie::hotkey::replace_hotkey(manager, hotkey, new_hotkey, || Ok(()))
+                                .map_err(|e| e.to_string())?;
+                            hotkey = new_hotkey;
+                        }
+                        let theme = regie::theme::resolve(
+                            next.terminal_theme,
+                            terminal_profile::from_default_terminal(),
+                            terminal_profile::default_font(),
+                        )
+                        .theme;
+                        if let Some(dropdown) = dropdown.as_mut() {
+                            dropdown.apply_config(&next, &theme)?;
+                        }
+                        app_ui::apply_appearance(next.appearance);
+                        let _ = workspace.apply_config(&next);
+                        config = next;
+                        Ok(())
+                    })();
+                    pending.extend(settings.finish(SettingsResult::Apply { generation, result }));
+                }
+            }
+        }
+        let warning = settings_warning.is_some() || watcher_warning.is_some();
+        if warning != warning_icon {
+            if let Some(menu) = &ui {
+                menu.set_config_warning(warning);
+            }
+            if let Some(icon) = &tray {
+                let result = icon.set_icon(Some(if warning {
+                    regie::build_warning_icon()
+                } else {
+                    build_icon()
+                }));
+                if let Err(error) = result {
+                    eprintln!("could not update menu icon: {error}");
+                }
+            }
+            warning_icon = warning;
+        }
         let mut effects: VecDeque<_> = effects.into();
         while let Some(effect) = effects.pop_front() {
             match effect {
@@ -275,7 +508,7 @@ fn main() {
         {
             *control_flow = ControlFlow::Poll;
         }
-        let _ = (&tray, &ui, &manager, &instance);
+        let _ = (&tray, &ui, &manager, &instance, &watcher);
     });
 }
 

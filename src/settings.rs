@@ -382,7 +382,7 @@ fn assign(c: &mut Config, k: SettingKey, v: SettingValue) -> bool {
     }
     true
 }
-fn value_for(c: &Config, k: SettingKey) -> Option<SettingValue> {
+pub fn value_for(c: &Config, k: SettingKey) -> Option<SettingValue> {
     use SettingKey::*;
     Some(match k {
         Hotkey => SettingValue::String(c.hotkey.clone()),

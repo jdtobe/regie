@@ -6,6 +6,7 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 
 #[derive(Debug, Clone, Copy)]
 pub enum AppCommand {
+    OpenSettings,
     NewTab,
     CloseActiveTab,
     Quit,
@@ -14,6 +15,7 @@ pub enum AppCommand {
 pub struct AppUi {
     pub tray: Menu,
     _menubar: Menu,
+    tray_settings: MenuItem,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,18 +65,37 @@ impl AppUi {
             Some(Accelerator::new(Modifiers::META, Code::KeyQ)),
         );
         let tray_quit = MenuItem::new(format!("Quit {APP_NAME}"), true, None);
+        let settings = MenuItem::new(
+            "Settings…",
+            true,
+            Some(Accelerator::new(Modifiers::META, Code::Comma)),
+        );
+        let tray_settings = MenuItem::new("Settings…", true, None);
         let tray = Menu::new();
         let about = PredefinedMenuItem::about(None, Some(about_metadata()));
-        app.append_items(&[&about, &PredefinedMenuItem::separator(), &quit])
-            .map_err(|e| e.to_string())?;
+        app.append_items(&[
+            &about,
+            &PredefinedMenuItem::separator(),
+            &settings,
+            &PredefinedMenuItem::separator(),
+            &quit,
+        ])
+        .map_err(|e| e.to_string())?;
         file.append_items(&[&new, &close])
             .map_err(|e| e.to_string())?;
         menubar
             .append_items(&[&app, &file])
             .map_err(|e| e.to_string())?;
-        tray.append_items(&[&about, &PredefinedMenuItem::separator(), &tray_quit])
-            .map_err(|e| e.to_string())?;
+        tray.append_items(&[
+            &about,
+            &tray_settings,
+            &PredefinedMenuItem::separator(),
+            &tray_quit,
+        ])
+        .map_err(|e| e.to_string())?;
         let actions = [
+            (settings.id().clone(), AppCommand::OpenSettings),
+            (tray_settings.id().clone(), AppCommand::OpenSettings),
             (new.id().clone(), AppCommand::NewTab),
             (close.id().clone(), AppCommand::CloseActiveTab),
             (quit.id().clone(), AppCommand::Quit),
@@ -95,7 +116,16 @@ impl AppUi {
         Ok(Self {
             tray,
             _menubar: menubar,
+            tray_settings,
         })
+    }
+
+    pub fn set_config_warning(&self, warning: bool) {
+        self.tray_settings.set_text(if warning {
+            "Configuration needs attention…"
+        } else {
+            "Settings…"
+        });
     }
 }
 
